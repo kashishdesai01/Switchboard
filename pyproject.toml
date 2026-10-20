@@ -1,0 +1,25 @@
+[project]
+name = "switchboard"
+version = "0.1.0"
+description = "Synthetic clinic voice and scheduling demo"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "httpx>=0.28,<1",
+    "twilio>=9,<10",
+    "uvicorn>=0.34,<1",
+    "websockets>=15,<18",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
