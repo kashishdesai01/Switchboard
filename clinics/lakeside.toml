@@ -1,0 +1,19 @@
+id = "lakeside-pediatrics"
+version = 1
+name = "Lakeside Pediatrics"
+timezone = "America/Chicago"
+accepted_payers = ["Blue Cross Blue Shield", "Cigna", "UnitedHealthcare"]
+hold_seconds = 180
+cancel_notice_hours = 24
+weekday_hours = "8:00 AM to 4:00 PM, Monday through Friday"
+[providers]
+singh = "Dr. Asha Singh"
+garcia = "Dr. Elena Garcia"
+
+[locations]
+lakefront = "Lakefront Clinic"
+north = "North Clinic"
+
+[provider_locations]
+singh = "lakefront"
+garcia = "north"

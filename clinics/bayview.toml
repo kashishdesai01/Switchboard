@@ -1,0 +1,35 @@
+id = "bayview-ortho"
+version = 3
+name = "Bayview Orthopedics"
+timezone = "America/Los_Angeles"
+accepted_payers = ["Aetna", "Blue Shield of California", "UnitedHealthcare", "Medicare"]
+hold_seconds = 180
+cancel_notice_hours = 24
+weekday_hours = "from 9:00 AM to 5:00 PM every day"
+daily_demo_slots = true
+preserve_demo_slots_for = ["chen", "patel"]
+[providers]
+patel = "Dr. Priya Patel"
+chen = "Dr. Daniel Chen"
+brooks = "Dr. Maya Brooks"
+kim = "Dr. Noah Kim"
+morgan = "Dr. Leah Morgan"
+shah = "Dr. Amir Shah"
+
+[locations]
+downtown = "Downtown Clinic"
+westside = "Westside Clinic"
+
+[provider_locations]
+chen = "downtown"
+patel = "westside"
+brooks = "downtown"
+kim = "westside"
+morgan = "downtown"
+shah = "westside"
+
+[referral_services]
+spine = ["spine", "spinal", "spine consultation"]
+
+[service_providers]
+spine = ["patel"]
