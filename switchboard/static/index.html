@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Switchboard | Call lab</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/app.js?v=automatic-email" defer></script>
+  <script src="/assets/stream.js?v=automatic-email" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <a class="wordmark" href="/" aria-label="Switchboard home"><span class="brand-mark" aria-hidden="true">▥</span> Switchboard</a>
+    <a href="/operations" class="nav-link" id="ops-link" hidden>Operations</a>
+    <span class="environment"><span></span> Synthetic clinic</span>
+  </header>
+  <main>
+    <div class="intro">
+      <p class="eyebrow" id="clinic-name">Clinic demo</p>
+      <h1>Clinic front desk</h1>
+      <p>Find a visit, change an appointment, or ask for help from the clinic team.</p>
+    </div>
+    <div class="layout">
+      <section class="panel call-panel" aria-labelledby="call-title">
+        <div class="panel-head">
+          <div><h2 id="call-title">Conversation</h2><p id="call-status" role="status">Ready to start</p></div>
+          <button type="button" id="call-button" class="primary" disabled>Start call</button>
+        </div>
+        <div class="voice-settings">
+          <label for="call-mode">Call mode</label>
+          <select id="call-mode" disabled>
+            <option value="browser">Text or browser voice</option>
+            <option value="deepgram" disabled>Deepgram streaming</option>
+          </select>
+          <p id="voice-status" role="status"></p>
+          <div id="live-voice" hidden>
+            <label for="voice-token">Demo access token</label>
+            <input id="voice-token" type="password" autocomplete="off" spellcheck="false">
+          </div>
+          <div id="browser-audio">
+            <label><input id="audio" type="checkbox"> Speak replies with browser voice</label>
+            <label for="browser-voice" id="browser-voice-label" hidden>Browser voice</label>
+            <select id="browser-voice" hidden><option value="">Suggested voice</option></select>
+          </div>
+        </div>
+        <div id="messages" class="messages" role="log" aria-label="Conversation">
+          <div class="empty">
+            <span class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+            <p>Start a call to get the greeting.</p>
+          </div>
+        </div>
+        <div id="suggestions" class="suggestions" aria-label="Example messages" hidden>
+          <button data-message="I want to book a follow-up">Book a visit</button>
+          <button data-message="I want to reschedule my appointment">Reschedule</button>
+          <button data-message="I want to cancel my appointment">Cancel</button>
+          <button data-message="Do you accept Aetna insurance?">Ask about insurance</button>
+        </div>
+        <div id="confirmation" class="suggestions" role="group" aria-label="Reply to read-back" hidden>
+          <button type="button" data-message="yes">Yes, confirm</button>
+          <button type="button" data-message="no">No</button>
+        </div>
+        <form id="composer">
+          <input id="message" maxlength="400" aria-label="Your message" placeholder="Type a response…" autocomplete="off" disabled>
+          <button id="mic" type="button" aria-label="Microphone" aria-pressed="false" disabled hidden>Enable mic</button>
+          <button type="submit" class="send" disabled>Send</button>
+        </form>
+        <section id="email-panel" class="email-panel" aria-labelledby="email-title" hidden>
+          <h2 id="email-title">Appointment confirmation</h2>
+          <p id="email-status" role="status"></p>
+        </section>
+      </section>
+      <aside>
+        <section class="panel calendar" aria-labelledby="calendar-title">
+          <h2 id="calendar-title">Visit calendar</h2>
+          <p id="calendar-status" role="status">Appointment options will appear here.</p>
+          <ol id="calendar-slots"></ol>
+        </section>
+        <section class="panel sample" aria-labelledby="sample-title">
+          <h2 id="sample-title">Sample patient</h2>
+          <p>These details are optional. In the local simulator, you can book a first visit using a fictional name and date of birth.</p>
+          <dl id="sample-details">
+            <div><dt>Full name</dt><dd><button type="button" data-fill="My name is Maria Lopez" aria-label="Fill in sample name Maria Lopez" disabled>Maria Lopez</button></dd></div>
+            <div><dt>Date of birth</dt><dd><button type="button" data-fill="1984-07-02" aria-label="Fill in sample date of birth July 2, 1984" disabled>1984-07-02</button></dd></div>
+          </dl>
+        </section>
+        <section class="panel activity" aria-labelledby="activity-title">
+          <div class="activity-head"><h2 id="activity-title">Call activity</h2><span id="backend"></span></div>
+          <ul id="events" aria-live="polite"><li>Activity appears here during a call.</li></ul>
+        </section>
+      </aside>
+    </div>
+    <footer>Use fictional patient details. This demo does not contact clinic staff.</footer>
+  </main>
+</body>
+</html>

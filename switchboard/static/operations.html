@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Switchboard | Operations</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/operations.js?v=staff-calendar" defer></script>
+  <script src="/assets/staff-calendar.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <a class="wordmark" href="/" aria-label="Switchboard call lab"><span class="brand-mark" aria-hidden="true">▥</span> Switchboard</a>
+    <a href="/" class="nav-link">Call lab</a>
+  </header>
+  <main>
+    <div class="intro">
+      <p class="eyebrow" id="clinic-name">Clinic demo</p>
+      <h1>Operations</h1>
+      <p>See the clinic schedule, review calls, and follow up on patient requests.</p>
+    </div>
+    <section id="unlock-panel" class="panel">
+      <form id="unlock"><input id="ops-token" type="password" aria-label="Operations token" autocomplete="off" placeholder="Operations access token" required><button type="submit" class="primary">Unlock</button></form>
+    </section>
+    <p id="ops-status" role="status"></p>
+    <div id="dashboard" hidden>
+      <section class="panel ops-section" aria-labelledby="appointments-title">
+        <div class="panel-head"><div><h2 id="appointments-title">Appointments</h2><p id="clinic-zone"></p></div></div>
+        <div class="staff-filters">
+          <button id="previous-day" type="button" aria-label="Previous day">‹</button>
+          <label>Date <input id="calendar-day" type="date"></label>
+          <button id="next-day" type="button" aria-label="Next day">›</button>
+          <label>Doctor <select id="calendar-provider"><option value="">All doctors</option></select></label>
+          <label>Status <select id="calendar-status"><option value="">All statuses</option><option value="booked">Booked</option><option value="cancelled">Cancelled</option></select></label>
+          <button id="calendar-refresh" type="button">Refresh</button>
+        </div>
+        <p id="appointment-status" class="staff-status" role="status"></p>
+        <div id="appointment-items"></div>
+      </section>
+      <div class="stats">
+        <div class="panel"><p>Active calls</p><strong id="active-count"></strong></div>
+        <div class="panel"><p>Needs review</p><strong id="review-count"></strong></div>
+        <div class="panel"><p>Turn processing · p50</p><strong id="turn-p50"></strong></div>
+        <div class="panel"><p>Turn processing · p95</p><strong id="turn-p95"></strong></div>
+      </div>
+      <section class="panel ops-section" aria-labelledby="work-title">
+        <div class="panel-head"><div><h2 id="work-title">Staff work queue</h2><p>Claim a request and record how it was handled.</p></div></div>
+        <div id="work-items"></div>
+        <p id="work-status" role="status"></p>
+      </section>
+      <div class="layout ops-section">
+        <section class="panel" aria-labelledby="notices-title">
+          <div class="panel-head"><h2 id="notices-title">Confirmation outbox</h2></div>
+          <div id="notice-items" class="ops-list"></div>
+        </section>
+        <section class="panel" aria-labelledby="waitlist-title">
+          <div class="panel-head"><h2 id="waitlist-title">Waitlist</h2></div>
+          <div id="waitlist-items" class="ops-list"></div>
+        </section>
+      </div>
+      <section id="unresolved-panel" class="panel" hidden>
+        <div class="panel-head"><div><h2>Appointment writes</h2><p id="write-summary"></p></div></div>
+        <ul id="unresolved"></ul>
+      </section>
+      <div class="layout">
+        <section class="panel" aria-labelledby="recent-title">
+          <div class="panel-head"><div><h2 id="recent-title">Calls</h2><p>Active and the 50 most recent</p></div></div>
+          <div id="ops-calls"></div>
+        </section>
+        <section class="panel" aria-labelledby="timeline-title">
+          <div class="panel-head"><div><h2 id="timeline-title">Call timeline</h2><p id="timeline-id">Select a call</p></div><button id="mark-reviewed" type="button" hidden>Mark reviewed</button></div>
+          <div class="staff-transcript" id="call-review" hidden>
+            <button id="view-transcript" type="button" aria-expanded="false">View conversation</button>
+            <div id="call-conversation" hidden></div>
+          </div>
+          <ol id="timeline"></ol>
+        </section>
+      </div>
+    </div>
+    <dialog id="appointment-dialog" aria-labelledby="appointment-action-title">
+      <div class="panel-head"><h2 id="appointment-action-title"></h2></div>
+      <div class="staff-dialog-body">
+        <p id="appointment-action-details"></p>
+        <label id="move-date-label">New date <input id="move-date" type="date"></label>
+        <div id="move-openings"></div>
+        <p id="appointment-action-status" role="status"></p>
+        <div class="staff-actions">
+          <button id="dismiss-action" type="button">Back</button>
+          <button id="confirm-action" type="button" class="primary"></button>
+        </div>
+      </div>
+    </dialog>
+  </main>
+</body>
+</html>
