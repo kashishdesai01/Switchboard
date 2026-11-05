@@ -1,0 +1,70 @@
+x-switchboard: &switchboard
+  image: switchboard-demo:local
+  build: .
+  profiles: [demo]
+  environment:
+    SWITCHBOARD_FHIR_URL: http://fhir:8080/fhir
+
+services:
+  app:
+    <<: *switchboard
+    environment:
+      SWITCHBOARD_FHIR_URL: http://fhir:8080/fhir
+      SWITCHBOARD_OPERATIONS_TOKEN: ${SWITCHBOARD_OPERATIONS_TOKEN:-}
+      SWITCHBOARD_FHIR_REGISTRATION: ${SWITCHBOARD_FHIR_REGISTRATION:-0}
+      SWITCHBOARD_SMTP_HOST: ${SWITCHBOARD_SMTP_HOST:-}
+      SWITCHBOARD_SMTP_PORT: ${SWITCHBOARD_SMTP_PORT:-587}
+      SWITCHBOARD_SMTP_FROM: ${SWITCHBOARD_SMTP_FROM:-}
+      SWITCHBOARD_SMTP_RECIPIENTS: ${SWITCHBOARD_SMTP_RECIPIENTS:-}
+      SWITCHBOARD_SMTP_USERNAME: ${SWITCHBOARD_SMTP_USERNAME:-}
+      SWITCHBOARD_SMTP_PASSWORD: ${SWITCHBOARD_SMTP_PASSWORD:-}
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${SWITCHBOARD_APP_PORT:-8765}:8080"
+    volumes:
+      - app-data:/data
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=3)"]
+      interval: 5s
+      timeout: 4s
+      retries: 6
+
+  seed:
+    <<: *switchboard
+    command: ["/app/.venv/bin/python", "-m", "switchboard.seed", "--wait", "240"]
+    depends_on:
+      fhir:
+        condition: service_started
+
+  fhir:
+    image: hapiproject/hapi:v8.8.0-1@sha256:34c86fd5805df77c2b9d9c10538050b16ac3dc244352da0ebe4717f931330775
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://fhir-db:5432/fhir
+      SPRING_DATASOURCE_USERNAME: fhir
+      SPRING_DATASOURCE_PASSWORD: switchboard-local
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
+      SPRING_JPA_PROPERTIES_HIBERNATE_DIALECT: ca.uhn.fhir.jpa.model.dialect.HapiFhirPostgresDialect
+      HAPI_FHIR_FHIR_VERSION: R4
+    ports:
+      - "127.0.0.1:${SWITCHBOARD_FHIR_PORT:-8095}:8080"
+    depends_on:
+      fhir-db:
+        condition: service_healthy
+  fhir-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: fhir
+      POSTGRES_USER: fhir
+      POSTGRES_PASSWORD: switchboard-local
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fhir -d fhir"]
+      interval: 3s
+      timeout: 2s
+      retries: 15
+    volumes:
+      - fhir-data:/var/lib/postgresql/data
+volumes:
+  app-data:
+  fhir-data:
