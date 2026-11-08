@@ -1,0 +1,46 @@
+name: CI
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.10.7"
+      - run: uv sync --locked --python 3.12
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest -q
+      - run: uv run python -m evals.run_text
+      - run: |
+          node --check switchboard/static/app.js
+          node --check switchboard/static/stream.js
+          node --check switchboard/static/capture.js
+          node --check switchboard/static/operations.js
+
+  fhir:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SWITCHBOARD_FHIR_URL: http://127.0.0.1:8095/fhir
+      SWITCHBOARD_TEST_FHIR_URL: http://127.0.0.1:8095/fhir
+      SWITCHBOARD_OPERATIONS_TOKEN: switchboard-ci-synthetic-only-token
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.10.7"
+      - run: uv sync --locked --python 3.12
+      - run: docker compose up --build --wait --wait-timeout 360 app
+      - run: uv run pytest -q tests/test_hapi.py
+      - run: uv run python -m evals.smoke_deployment
+      - if: failure()
+        run: docker compose --profile demo logs --tail=100
+      - if: always()
+        run: docker compose --profile demo down --volumes
