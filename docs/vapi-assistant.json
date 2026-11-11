@@ -1,0 +1,35 @@
+{
+  "name": "Switchboard phone demo",
+  "firstMessage": "Hi, thanks for calling Bayview Orthopedics. This is the Switchboard demo. Please use fictional patient details. How can I help today?",
+  "model": {
+    "provider": "custom-llm",
+    "model": "switchboard",
+    "url": "https://REPLACE-ME/vapi",
+    "metadataSendMode": "variable",
+    "headers": {
+      "X-Switchboard-Vapi-Secret": "REPLACE-ME"
+    }
+  },
+  "server": {
+    "url": "https://REPLACE-ME/vapi/events",
+    "headers": {
+      "X-Switchboard-Vapi-Secret": "REPLACE-ME"
+    }
+  },
+  "serverMessages": ["assistant.speechStarted", "speech-update", "user-interrupted", "status-update"],
+  "transcriber": {"provider": "deepgram", "model": "nova-3", "language": "en", "smartFormat": true, "numerals": true},
+  "voice": {
+    "provider": "deepgram", "model": "aura-2", "voiceId": "helena", "speed": 0.9,
+    "chunkPlan": {"enabled": true, "minCharacters": 80}
+  },
+  "startSpeakingPlan": {"waitSeconds": 0.65},
+  "stopSpeakingPlan": {"numWords": 2, "voiceSeconds": 0.3},
+  "backgroundSound": "off",
+  "maxDurationSeconds": 480,
+  "keypadInputPlan": {"enabled": true, "timeoutSeconds": 3, "delimiters": ["#"]},
+  "artifactPlan": {
+    "recordingEnabled": false,
+    "pcapEnabled": false,
+    "transcriptPlan": {"enabled": false}
+  }
+}
