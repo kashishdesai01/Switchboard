@@ -17,7 +17,7 @@ Every phase must keep that baseline green, and must remove the xfail marks for t
   Triage levels: emergency (911), crisis (988), poisoning, urgent same-day, routine. The symptom list moves into a data file that includes orthopedic warning signs. Add a labelled safety set and a CI gate that requires 100% of the must-catch phrases to be caught.
   Done: `uv run pytest -q tests/test_safety.py` passes, including the safety set; the missed-emergency gap tests pass.
 
-- [ ] **Phase 4: Emergency handling.**
+- [x] **Phase 4: Emergency handling.**
   Add the emergency notice to the greeting and a script for each level. Unclear answers to the clarifying question escalate. A separate safety check by the model runs on every turn and can only raise the level. Emergency and urgent results create an urgent work item and transfer to staff when possible.
   Done: new tests for each behavior pass; baseline green.
 

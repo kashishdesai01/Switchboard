@@ -13,7 +13,18 @@ from uuid import uuid4
 
 from switchboard.frontdesk import email_address
 from switchboard.intents import TurnInterpreter, TurnMeaning
-from switchboard.safety import EMERGENCY_SCRIPT, SafetySignal, condition_only, safety_signal
+from switchboard.safety import (
+    ACUTE_REASONS,
+    ACUTE_SCRIPTS,
+    GREETING_NOTICE,
+    URGENT_SCRIPT,
+    Level,
+    Triage,
+    assess,
+    condition_only,
+    raise_level,
+    triage,
+)
 from switchboard.scheduling import Change, Scheduling, instant
 from switchboard.spoken import (
     MONTH_PATTERN,
@@ -210,7 +221,7 @@ class Call:
     def greeting(self) -> Reply:
         return self.say(
             f"Hi, thanks for calling {self.scheduling.clinic.name}. I'm the automated demo assistant. "
-            "How can I help today?"
+            f"{GREETING_NOTICE} How can I help today?"
         )
 
     def say(
@@ -251,9 +262,13 @@ class Call:
             self.stage = "closed"
         return reply
 
-    def _work(self, reason: str) -> None:
+    def _work(self, reason: str, triaged: Triage | None = None) -> None:
         if self.trace and self.frontdesk:
             context = {"request": self.intent, "stage": self.stage}
+            if triaged is not None:
+                context["triage_level"] = triaged.level.value
+                if triaged.category:
+                    context["category"] = triaged.category
             if self.patient and not self.new_patient:
                 context["patient_reference"] = f"Patient/{self.patient}"
             context.update({key: value for key, value in self._preferences().items() if value})
@@ -332,20 +347,30 @@ class Call:
     async def _handle_turn(self, text: str, *, safety_clarification: str | None = None) -> Reply:
         text = text.strip()
         words = " ".join(text.lower().replace(",", " ").replace("’", "'").strip(".!? ").split())
-        signal = safety_signal(text)
-        if signal is SafetySignal.ACUTE:
-            return self.emergency_reply()
+        rules, ambiguous = assess(text)
+        if rules.level.acute:
+            return self.emergency_reply(result=rules)
         if self.stage == "closed":
             return self.say("This call has ended.", outcome="closed")
         try:
             try:
-                meaning = await self._interpret_turn(
-                    text
-                    if safety_clarification is None
-                    else f"{text}\nWhen asked if the condition is happening now, the caller answered: {safety_clarification}"
+                # The model safety check runs beside the turn interpreter. It can only
+                # raise the rule-based level; a timeout or error leaves the rules in charge.
+                meaning, model = await asyncio.gather(
+                    self._interpret_turn(
+                        text
+                        if safety_clarification is None
+                        else f"{text}\nWhen asked if the condition is happening now, the caller answered: {safety_clarification}"
+                    ),
+                    self._assess_safety(text),
                 )
+                level = raise_level(rules, model)
+                if level.level.acute:
+                    return self.emergency_reply(result=level)
                 if meaning and meaning.emergency:
                     return self.emergency_reply()
+                if level.level is Level.URGENT:
+                    return await self.urgent_reply(level)
                 if self.safety_resume:
                     lead = leading_answer(text)
                     if lead.answer == "yes" or (meaning and meaning.action == "current_danger"):
@@ -376,15 +401,12 @@ class Call:
                         )
                     self.safety_retries += 1
                     if self.safety_retries >= 2:
+                        # Two unclear answers: treat it as a possible emergency.
                         await self.close()
-                        return self._handoff(
-                            "staff_requested",
-                            "I couldn't tell whether this is happening now. "
-                            "If this is an emergency, call 911 now. The front desk can help with scheduling.",
-                        )
+                        return self.emergency_reply(reason="possible_emergency")
                 if self.safety_resume or (
                     safety_clarification is None
-                    and signal is SafetySignal.AMBIGUOUS
+                    and ambiguous
                     and (meaning is None or meaning.action == "unclear" or condition_only(text))
                 ):
                     if not self.safety_resume:
@@ -486,13 +508,59 @@ class Call:
                 outcome="needs_review",
             )
 
-    def emergency_reply(self, text: str | None = None) -> Reply:
+    def emergency_reply(
+        self, text: str | None = None, *, result: Triage | None = None, reason: str | None = None
+    ) -> Reply:
+        """Give the script for an emergency, crisis or poisoning and end the call.
+
+        ``text`` is a caller turn not yet recorded, such as a barge-in. Its triage
+        picks the script when no result is given. Anything else gets the 911 script.
+        """
         if text and self.trace:
             self.trace.record("caller", text)
-        reply = self.say(EMERGENCY_SCRIPT, outcome="emergency")
+        if result is None and text:
+            result = triage(text)
+        if result is None or not result.level.acute:
+            result = Triage(Level.EMERGENCY, result.category if result else None)
+        # Emergency work replaces any earlier staff work for this call.
+        self._work(reason or ACUTE_REASONS[result.level], result)
+        reply = self.say(ACUTE_SCRIPTS[result.level], outcome="emergency")
         if self.trace:
-            self.trace.add("emergency_routed")
+            self.trace.add(
+                "emergency_routed",
+                state=self.stage,
+                level=result.level.value,
+                category=result.category or "unspecified",
+            )
         return reply
+
+    async def urgent_reply(self, result: Triage) -> Reply:
+        """Same-day symptoms go to the clinical team, never to a routine booking."""
+        await self.close()
+        self.options = []
+        self._work("urgent_symptoms", result)
+        reply = self.say(URGENT_SCRIPT, outcome="handoff")
+        if self.trace:
+            self.trace.add(
+                "urgent_routed",
+                state=self.stage,
+                level=result.level.value,
+                category=result.category or "unspecified",
+            )
+        return reply
+
+    async def _assess_safety(self, text: str) -> Level | None:
+        assessor = getattr(self.interpreter, "assess_safety", None)
+        if assessor is None:
+            return None
+        try:
+            async with asyncio.timeout(8):
+                level = await assessor(text, list(self.history)[-3:])
+        except Exception:  # noqa: BLE001 - any model failure falls back to the rules
+            level = None
+        if self.trace:
+            self.trace.add("safety_assessed" if level is not None else "safety_unassessed")
+        return level if isinstance(level, Level) else None
 
     async def _interpret_turn(self, text: str) -> TurnMeaning | None:
         if not self.interpreter:

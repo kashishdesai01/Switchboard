@@ -50,13 +50,21 @@ class Trace:
         if self.operations.capture_transcripts and text.strip():
             self.transcript.append({"speaker": speaker, "text": text[:400]})
 
-    def add(self, event: str, *, state: str | None = None, latency_ms: int | None = None) -> None:
+    def add(
+        self,
+        event: str,
+        *,
+        state: str | None = None,
+        latency_ms: int | None = None,
+        **detail: str,
+    ) -> None:
         self.events.append(
             {
                 "event": event,
                 "state": state,
                 "latency_ms": latency_ms,
                 "elapsed_ms": round((time() - self.started) * 1000),
+                **detail,
             }
         )
 

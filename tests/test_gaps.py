@@ -315,7 +315,6 @@ def test_missed_emergency(report, tmp_path):
     run(scenario())
 
 
-@gap("suicidal ideation does not get the 988 crisis line")
 def test_crisis_reply_gives_988(tmp_path):
     async def scenario():
         session = Clinic(tmp_path).session()
@@ -325,7 +324,6 @@ def test_crisis_reply_gives_988(tmp_path):
     run(scenario())
 
 
-@gap("the greeting does not tell callers to hang up and dial 911 in an emergency")
 def test_greeting_mentions_911(tmp_path):
     session = Clinic(tmp_path).session()
     assert "911" in session.reply.text, session.reply.text

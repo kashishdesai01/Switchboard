@@ -12,6 +12,19 @@ from enum import Enum, auto
 from pathlib import Path
 
 EMERGENCY_SCRIPT = "If this is a medical emergency, hang up and call 911 now."
+CRISIS_SCRIPT = (
+    "If you're thinking about suicide or hurting yourself, call or text 988 to reach "
+    "the Suicide and Crisis Lifeline. If you're in immediate danger, call 911."
+)
+POISONING_SCRIPT = (
+    "Call Poison Control at 1-800-222-1222 now. If the person has collapsed, "
+    "can't breathe, or is having a seizure, call 911."
+)
+URGENT_SCRIPT = (
+    "That needs prompt attention from the clinical team. I'll ask them to call you back "
+    "today. If it gets worse, or you have trouble breathing, call 911."
+)
+GREETING_NOTICE = "If this is a medical emergency, hang up and call 911."
 
 # Split at changes of assertion, preserving lists and time qualifiers. Scope
 # context to each mention, so a past stroke cannot suppress a new symptom.
@@ -277,6 +290,45 @@ def _assess(text: str) -> tuple[Triage, bool]:
     if ambiguous:
         return Triage(Level.AMBIGUOUS), True
     return Triage(Level.NONE), False
+
+
+# Scripts and staff work item reasons for the levels that end the call.
+ACUTE_SCRIPTS = {
+    Level.EMERGENCY: EMERGENCY_SCRIPT,
+    Level.CRISIS: CRISIS_SCRIPT,
+    Level.POISONING: POISONING_SCRIPT,
+}
+ACUTE_REASONS = {
+    Level.EMERGENCY: "emergency",
+    Level.CRISIS: "crisis",
+    Level.POISONING: "poisoning",
+}
+# Levels a model safety check may report. AMBIGUOUS stays a rule-based judgment.
+MODEL_LEVELS = frozenset({Level.NONE, Level.URGENT, Level.POISONING, Level.CRISIS, Level.EMERGENCY})
+MODEL_CATEGORY = "model_assessment"
+
+
+def model_level(value: object) -> Level | None:
+    """Strictly parse a model's safety answer. Anything unexpected is no answer."""
+    if not isinstance(value, str):
+        return None
+    try:
+        level = Level(value.strip().upper())
+    except ValueError:
+        return None
+    return level if level in MODEL_LEVELS else None
+
+
+def raise_level(rules: Triage, model: Level | None) -> Triage:
+    """Combine the rule-based result with a model level. The model can only raise it."""
+    if model is None or model.rank <= rules.level.rank:
+        return rules
+    return Triage(model, MODEL_CATEGORY, (*rules.categories, MODEL_CATEGORY))
+
+
+def assess(text: str) -> tuple[Triage, bool]:
+    """The triage result, and whether a named diagnosis needs its timing clarified."""
+    return _assess(text)
 
 
 def triage(text: str) -> Triage:

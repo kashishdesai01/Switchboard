@@ -79,6 +79,7 @@ select { max-width: 100%; color: inherit; background: #141e1e; border: 1px solid
 .work-item { padding: 18px 0; border-bottom: 1px solid var(--line); }
 .work-item:last-child { border-bottom: 0; }
 .work-item h3 { font-size: 16px; text-transform: capitalize; margin: 0; }
+.work-item.urgent h3 span { background: #b42318; color: #fff; border-radius: 4px; padding: 1px 6px; font-size: 12px; text-transform: uppercase; }
 .work-item dl { max-width: 560px; }
 .work-item dd { text-align: right; overflow-wrap: anywhere; }
 @media (max-width: 760px) {

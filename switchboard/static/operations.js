@@ -15,6 +15,7 @@ const contextLabels = {
   day: "Requested date", days: "Requested dates", week: "Week of", period: "Preferred period",
   requested_time: "Requested time", after: "Earliest start", before: "Latest start",
   start: "Opening", slot: "Slot", operation: "Operation", delivery: "Delivery status",
+  triage_level: "Triage level", category: "Symptom category",
 };
 
 function content(tag, text) {
@@ -81,8 +82,10 @@ function renderWork(data) {
     lastWork = encoded;
     const tasks = (data.tasks || []).map((item) => {
       const card = document.createElement("article");
-      card.className = "work-item";
-      card.append(content("h3", label(item.reason)), content("p", `${label(item.status)}${item.assignee ? ` · ${item.assignee}` : ""}`));
+      card.className = item.urgent && item.status !== "resolved" ? "work-item urgent" : "work-item";
+      const heading = content("h3", label(item.reason));
+      if (item.urgent && item.status !== "resolved") heading.prepend(content("span", "Urgent"), " ");
+      card.append(heading, content("p", `${label(item.status)}${item.assignee ? ` · ${item.assignee}` : ""}`));
       card.append(content("p", item.next_action), itemDetails(item.context));
       if (item.context.patient_reference || item.context.slot || item.context.operation) {
         const lookup = content("button", "Check current scheduling record");
@@ -153,6 +156,7 @@ function showTimeline() {
     const row = document.createElement("li");
     const details = [`${entry.elapsed_ms} ms`, label(entry.event), entry.state];
     if (entry.latency_ms !== null) details.push(`${entry.latency_ms} ms processing`);
+    if (entry.level) details.push(`${label(entry.level)} · ${label(entry.category || "unspecified")}`);
     row.textContent = details.filter(Boolean).join(" · ");
     return row;
   });

@@ -36,10 +36,21 @@ TASK_REASONS = {
     "no_availability": "Check alternate dates, providers, or locations with the caller.",
     "waitlist_offer": "Recheck the released slot, then contact the patient to offer it. Obtain consent before booking.",
     "emergency": "Review the routing event under the clinic's emergency protocol.",
+    "crisis": "The caller was given the 988 Suicide and Crisis Lifeline. Follow the clinic's crisis protocol.",
+    "poisoning": "The caller was given Poison Control. Follow up under the clinic's emergency protocol.",
+    "possible_emergency": "The caller could not say whether symptoms were current and was told to call 911. Follow up under the clinic's emergency protocol.",
+    "urgent_symptoms": "Have the clinical team call the patient back today about the reported symptoms. Do not book a routine visit.",
     "policy_review": "Review the appointment and clinic policy, then follow up with the patient.",
     "email_delivery": "Review the notice delivery status before resending or contacting the patient.",
     "email_address_needed": "Contact the patient through the clinic's verified contact workflow to obtain an email address for the confirmation.",
 }
+
+
+# Work from safety routing that staff should see before anything else.
+URGENT_REASONS = frozenset(
+    {"emergency", "crisis", "poisoning", "possible_emergency", "urgent_symptoms"}
+)
+_URGENT_SQL = ", ".join(f"'{reason}'" for reason in sorted(URGENT_REASONS))
 
 
 def email_address(value: str) -> str | None:
@@ -150,12 +161,20 @@ class FrontDesk:
         with closing(self.connect()) as db:
             db.row_factory = sqlite3.Row
             tasks = []
+            # Open urgent work first, then other open work, then resolved work.
             for row in db.execute(
-                "SELECT * FROM staff_work ORDER BY status='resolved', updated DESC LIMIT 100"
+                f"""
+                SELECT * FROM staff_work
+                ORDER BY status='resolved',
+                    CASE WHEN status!='resolved' AND reason IN ({_URGENT_SQL}) THEN 0 ELSE 1 END,
+                    updated DESC
+                LIMIT 100
+                """
             ):
                 item = dict(row)
                 item["context"] = json.loads(item["context"])
                 item["next_action"] = TASK_REASONS[item["reason"]]
+                item["urgent"] = item["reason"] in URGENT_REASONS
                 tasks.append(item)
             notices = [
                 dict(row)
