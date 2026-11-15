@@ -9,7 +9,7 @@ Every phase must keep that baseline green, and must remove the xfail marks for t
   Add `tests/test_gaps.py`, with one `xfail(strict=True)` test per finding: proxy phrasings ("someone else", "it's for John Smith", "my father needs an appointment", "I'm calling for my father…", "cancel my mom's appointment" vs "…for my mom"), clarifying dead end ("no, it was in the past, I need to book a follow-up"), missed emergencies (suicidal ideation, face/throat swelling, can't swallow, open fracture), double booking, third appointment unreachable in text, name in opener ("hi this is Maria Lopez"), call ends after hours/insurance/no-appointments.
   Done: `uv run pytest -q tests/test_gaps.py` exits 0 with every test reported as xfailed.
 
-- [ ] **Phase 2: Shared reply parsers.**
+- [x] **Phase 2: Shared reply parsers.**
   Move language parsing out of `conversation.py` into `switchboard/understanding.py`. It covers: yes/no with the rest of the reply kept, recipient (self / other plus an optional name), name in the opening sentence, and booking verbs including "needs". Every stage uses these parsers. The model, when configured, fills the same structure.
   Done: the gap tests for proxy phrasing, clarifying dead end, name in opener and "needs" pass without xfail; baseline green.
 

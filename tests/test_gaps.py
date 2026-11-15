@@ -202,7 +202,6 @@ def test_control_reschedule(tmp_path):
 # Proxy and recipient phrasing
 
 
-@gap("'someone else' is not recognized as a proxy answer; the recipient question repeats")
 def test_someone_else_asks_permission(tmp_path):
     async def scenario():
         session = Clinic(tmp_path).session()
@@ -214,7 +213,6 @@ def test_someone_else_asks_permission(tmp_path):
     run(scenario())
 
 
-@gap("a named recipient ('it's for John Smith') is not recognized; the question repeats")
 def test_named_recipient_asks_permission(tmp_path):
     async def scenario():
         session = Clinic(tmp_path).session()
@@ -226,7 +224,6 @@ def test_named_recipient_asks_permission(tmp_path):
     run(scenario())
 
 
-@gap("'needs an appointment' is not a booking verb, so the proxy request is not understood")
 def test_father_needs_appointment_asks_permission(tmp_path):
     async def scenario():
         session = Clinic(tmp_path).session()
@@ -236,7 +233,6 @@ def test_father_needs_appointment_asks_permission(tmp_path):
     run(scenario())
 
 
-@gap("'I'm calling for my father' hands off to staff instead of asking for permission")
 def test_calling_for_father_asks_permission(tmp_path):
     async def scenario():
         session = Clinic(tmp_path).session()
@@ -289,7 +285,6 @@ def test_proxy_cancel_work_item_records_cancel(tmp_path):
 # Safety
 
 
-@gap("an answer to the stroke clarifying question that also asks to book loops forever")
 def test_past_stroke_then_follow_up_continues_booking(tmp_path):
     async def scenario():
         session = Clinic(tmp_path).session()
@@ -408,7 +403,6 @@ def test_third_appointment_reachable_in_text(tmp_path):
     run(scenario())
 
 
-@gap("a name given in the opening sentence is ignored and asked for again")
 def test_name_in_opener_is_used(tmp_path):
     async def scenario():
         session = Clinic(tmp_path).session()

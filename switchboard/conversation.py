@@ -9,11 +9,10 @@ from dataclasses import dataclass, replace
 from datetime import date, time, timedelta
 from time import monotonic
 from typing import TYPE_CHECKING
-from unicodedata import category, normalize
 from uuid import uuid4
 
 from switchboard.frontdesk import email_address
-from switchboard.intents import Route, TurnInterpreter, TurnMeaning
+from switchboard.intents import TurnInterpreter, TurnMeaning
 from switchboard.safety import EMERGENCY_SCRIPT, SafetySignal, condition_only, safety_signal
 from switchboard.scheduling import Change, Scheduling, instant
 from switchboard.spoken import (
@@ -26,6 +25,20 @@ from switchboard.spoken import (
     spoken_time,
 )
 from switchboard.store import Conflict, DemoStore, Resource, Unavailable
+from switchboard.understanding import (
+    answer_to_confirmation,
+    booking_recipient,
+    introduces_name,
+    is_booking_request,
+    leading_answer,
+    model_says_self,
+    name_from_reply,
+    opening_name,
+    proxy_request,
+    qualified,
+    request_route,
+    states_name,
+)
 
 if TYPE_CHECKING:
     from switchboard.frontdesk import FrontDesk
@@ -48,46 +61,12 @@ STAFF_TOPIC = re.compile(
     r"|(?:new|different) insurance (?:card|on file))\b",
     re.I,
 )
-RELATION = (
-    r"relative|family member|child|son|daughter|parent|mother|father|mom|dad|"
-    r"grandmother|grandfather|grandma|grandpa|sibling|brother|sister|aunt|uncle|"
-    r"cousin|spouse|wife|husband|partner|friend"
-)
-PROXY = re.compile(
-    rf"\b(?:for|on behalf of) (?:(?:my|our) (?:{RELATION})|"
-    r"(?:him|her|them|someone else|another person))\b(?!'s\b)",
-    re.I,
-)
-SELF_RECIPIENT = re.compile(
-    r"(?:it(?:'s| is) )?(?:for )?(?:me|myself)(?: please| thanks| thank you)?"
-)
-BOOK_REQUEST = re.compile(
-    r"\b(?:book(?:ing)?|schedule|set (?:something|a visit|it) up|"
-    r"(?:need|want|like|make|get|set up|arrange) (?:an? |the |another |to (?:make|get) )?appointment|"
-    r"^(?:an? )?appointment(?: please)?$|"
-    r"(?:need|want|like|arrange|set up) (?:a |another )?(?:(?:routine |first )?visit|follow[ -]?up(?: visit| meeting| appointment)?)|"
-    r"(?:see|visit|meet with|come in to see) (?:a |the |my |an? )?(?:doctor|provider|specialist|"
-    r"orthopedi\w*|dr\.?)|(?:need|want|like|have) to come in|squeeze (?:me|us) in|"
-    r"(?:can|could) i come in|get (?:in to see|an opening|a visit))\b"
-)
-AFFIRMATIVE = r"(?:yes|yeah|yep|yup|ya|sure|absolutely|of course|okay|ok|right|correct|confirm|sounds good|go (?:right )?ahead|that(?:'s| is) (?:correct|right|fine|me))"
-COURTESY = r"(?:please|thanks|thank you)"
-CONFIRM_ACTION = {"book": r"book|schedule", "reschedule": r"reschedule|move", "cancel": r"cancel"}
-NAME_INTRO = re.compile(
-    r"^(?:(?:my |the )?(?:full )?name is|i am|i['’]m|it['’]s|this is)\b[ ,:]*", re.I
-)
 PROVIDER_TITLE = re.compile(
     r"\b(?:(?:the|a|any|my|our|your)\s+doctor\b|(?:dr\.?|doctor)\s+([^\W\d_]+))", re.I
 )
 PROVIDER_NON_NAMES = frozenset(
     "today tomorrow tonight this next now later soon again on at in around before after "
     "monday tuesday wednesday thursday friday saturday sunday please is can available appointment".split()
-)
-INTRODUCED_NAME = re.compile(r"\bmy (?:full )?name is\s+([^!?;,]+)", re.I)
-SENTENCE_AS_NAME = re.compile(
-    r"\b(?:i|we|you|it|that|this|they|he|she)\s+(?:am|are|is|was|were|can|could|do|did|need|want|will|would|should|have|has)\b"
-    r"|\b(?:could you|please repeat|my name|not sure|i'm|i've)\b",
-    re.I,
 )
 MORE_TIMES = re.compile(
     r"\b(?:(?:other|more|different|additional) (?:times|openings|slots|options)|what else (?:is available|do you have))\b"
@@ -150,25 +129,6 @@ CONFIRMATION_STAGES = {
     "day_alternative",
     "proxy_booking",
 }
-
-
-def answer_to_confirmation(words: str, action: str | None = None) -> str | None:
-    # Match complete replies so a qualifier such as "but on Monday" reaches scheduling.
-    reply = " ".join(re.sub(r"[.!?,;]+", " ", words).split())
-    if re.fullmatch(rf"(?:(?:ok|okay) )?(?:no|nope|no way|don't|do not)(?: {COURTESY})?", reply):
-        return "no"
-    reply = re.sub(r"^(yes|yeah|ya|yep) shore\b", r"\1 sure", reply)
-    if action and reply in {"ok", "okay", "right"}:
-        return None
-    if re.fullmatch(rf"(?:{AFFIRMATIVE} )*{AFFIRMATIVE}(?: {COURTESY})?", reply):
-        return "yes"
-    if action and re.fullmatch(
-        rf"(?:(?:{AFFIRMATIVE}|please) )*(?:{CONFIRM_ACTION[action]}) "
-        rf"(?:it|that|the appointment)(?: {COURTESY})?",
-        reply,
-    ):
-        return "yes"
-    return None
 
 
 @dataclass(frozen=True)
@@ -387,13 +347,25 @@ class Call:
                 if meaning and meaning.emergency:
                     return self.emergency_reply()
                 if self.safety_resume:
-                    answer = answer_to_confirmation(words)
-                    if words == "yes" or (meaning and meaning.action == "current_danger"):
+                    lead = leading_answer(text)
+                    if lead.answer == "yes" or (meaning and meaning.action == "current_danger"):
                         return self.emergency_reply()
-                    if answer == "no" or (meaning and meaning.action == "historical"):
+                    if (
+                        lead.answer == "no"
+                        or answer_to_confirmation(words) == "no"
+                        or (meaning and meaning.action == "historical")
+                    ):
                         opening, self.safety_opening = self.safety_opening, None
                         previous, self.safety_resume = self.safety_resume, None
                         self.safety_retries = 0
+                        # "No, it was in the past, I need to book a follow-up" carries a request.
+                        if (
+                            self.stage == "intent"
+                            and lead.answer == "no"
+                            and lead.rest
+                            and request_route(lead.rest) != "unknown"
+                        ):
+                            return await self._handle_turn(lead.rest, safety_clarification=text)
                         if opening is not None and not condition_only(opening):
                             return await self._handle_turn(opening, safety_clarification=text)
                         return self.say(
@@ -423,8 +395,11 @@ class Call:
                         "Is this happening right now? If it is an emergency, call 911 now."
                     )
                 staff = STAFF_TOPIC.search(words)
-                proxy = PROXY.search(words)
-                book_request = bool(BOOK_REQUEST.search(words))
+                proxy = proxy_request(words)
+                if proxy and proxy.form == "possessive":
+                    # "my mom's appointment" keeps today's handling until proxy policy covers it.
+                    proxy = None
+                book_request = is_booking_request(words)
                 booking = self.stage == "intent" and (
                     book_request or (not staff and bool(meaning and meaning.action == "book"))
                 )
@@ -443,7 +418,7 @@ class Call:
                     return await self._handle(text, words, meaning)
                 grounded_reply = (
                     (self.stage == "dob" and bool(birth_dates(text, self.scheduling.now().date())))
-                    or (self.stage == "name" and bool(self._name_candidate(text)))
+                    or (self.stage == "name" and bool(name_from_reply(text)))
                     or (
                         self.stage in CONFIRMATION_STAGES
                         and answer_to_confirmation(words) is not None
@@ -593,10 +568,7 @@ class Call:
         if meaning.action == "decline":
             return "no"
         # Reject qualifications and contradictory evidence before interpreting consent.
-        if meaning.action == "affirm" and not re.search(
-            r"\b(?:no|not|don't|cannot|can't|but|unless|instead|maybe|if|wait|later)\b|\d",
-            words,
-        ):
+        if meaning.action == "affirm" and not qualified(words):
             return "yes"
         return None
 
@@ -618,20 +590,12 @@ class Call:
             case "intent":
                 return await self._start(words, text, meaning)
             case "booking_recipient":
-                if (
-                    action == "other"
-                    or PROXY.search(words)
-                    or re.fullmatch(rf"(?:for )?(?:him|her|them|(?:my|our) (?:{RELATION}))", words)
-                ):
+                recipient = booking_recipient(text)
+                if action == "other" or recipient.kind == "other":
                     if not self.proxy_booking_allowed:
                         self.pending_booking = None
                     return self._ask_proxy_permission()
-                if SELF_RECIPIENT.fullmatch(words) or (
-                    action == "self"
-                    and value == text.strip()
-                    and re.search(r"\b(?:i|me|myself|mine)\b", words)
-                    and not re.search(r"\b(?:not|no|maybe|both|also|and|or|instead)\b", words)
-                ):
+                if recipient.kind == "self" or (action == "self" and model_says_self(text, value)):
                     assert self.pending_booking is not None
                     opening_words, opening_text, opening_meaning = self.pending_booking
                     self.pending_booking = None
@@ -704,7 +668,7 @@ class Call:
                 if answer == "no" or words in {"change it", "change my name", "the name"}:
                     self.name = ""
                     return self._ask_name()
-                if INTRODUCED_NAME.search(text):
+                if states_name(text):
                     return self._capture_name(text, confirm=True)
                 if action in TURN_ACTIONS["correct_identity"]:
                     return self._apply_identity_correction(text, words, action, value)
@@ -888,27 +852,6 @@ class Call:
         self.stage = "check_dob"
         return self._read_identity()
 
-    def _route(self, words: str) -> Route:
-        if re.search(
-            r"\b(?:reschedule|move|change)\b.{0,30}\b(?:insurance|coverage|address|email|phone number)\b",
-            words,
-        ):
-            return "staff"
-        if re.search(
-            r"\breschedul\w*\b|\b(?:move|change)\b.{0,45}\b(?:appointment|visit|booking|time|slot)\b",
-            words,
-        ):
-            return "reschedule"
-        if re.search(r"\bcancel\b", words):
-            return "cancel"
-        if BOOK_REQUEST.search(words) and not re.search(
-            r"\b(?:accept|take|which|what|do you)\b.{0,24}\b(?:insurance|coverage)\b", words
-        ):
-            return "book"
-        if re.search(r"\b(insurance|coverage|accept)\b", words):
-            return "insurance"
-        return "unknown"
-
     async def _start(
         self,
         words: str,
@@ -930,7 +873,7 @@ class Call:
                     outcome="info_only",
                 )
             if (meaning and meaning.action == "coverage") or (
-                not BOOK_REQUEST.search(words)
+                not is_booking_request(words)
                 and re.search(r"\bmy (insurance|coverage|plan)\b", words)
                 and not re.search(r"\b(accept|take)\b", words)
             ):
@@ -942,8 +885,8 @@ class Call:
             else meaning.action
             if meaning and meaning.action in {"book", "reschedule", "cancel", "insurance"}
             else "book"
-            if self.staff_topic and BOOK_REQUEST.search(words)
-            else self._route(words)
+            if self.staff_topic and is_booking_request(words)
+            else request_route(words)
         )
         if (
             self.frontdesk
@@ -980,13 +923,8 @@ class Call:
                     "You can also ask for the front desk."
                 )
             self.opening_interpreter_failures = 0
-            if (
-                self.frontdesk
-                and not self.booking_for_other
-                and (opening_name := INTRODUCED_NAME.search(text))
-            ):
-                if candidate := self._name_candidate(opening_name[1]):
-                    self.name = candidate
+            if self.frontdesk and not self.booking_for_other and (name := opening_name(text)):
+                self.name = name
             self.unclear += 1
             if self.frontdesk and self.unclear >= 3:
                 return self._handoff(
@@ -1000,13 +938,8 @@ class Call:
             self.unclear = 0
             self.stage = "booking_recipient"
             return self.say("Is the appointment for you or for someone else?")
-        if (
-            self.frontdesk
-            and not self.booking_for_other
-            and (opening_name := INTRODUCED_NAME.search(text))
-        ):
-            if candidate := self._name_candidate(opening_name[1]):
-                self.name = candidate
+        if self.frontdesk and not self.booking_for_other and (name := opening_name(text)):
+            self.name = name
         self.intent = intent
         self.unclear = 0
         self.visit = (
@@ -1205,30 +1138,6 @@ class Call:
             else "What name should I use?"
         )
 
-    @staticmethod
-    def _name_candidate(text: str) -> str | None:
-        if introduction := INTRODUCED_NAME.search(text):
-            text = introduction[1]
-        text = NAME_INTRO.sub("", " ".join(text.split()))
-        text = re.split(r"(?<!\b[^\W\d_])\.(?=\s|$)", text, maxsplit=1)[0]
-        text = re.split(
-            r"\s+(?:(?:and\s+)?(?:i(?:'m| am| want| need| would)|my date of birth|born))\b",
-            text,
-            maxsplit=1,
-            flags=re.I,
-        )[0]
-        name = normalize("NFC", text.strip(" ,.!?"))
-        if SENTENCE_AS_NAME.search(name) or answer_to_confirmation(name.casefold()):
-            return None
-        parts = name.split()
-        if len(parts) >= 3 and all(len(part) == 1 and part.isalpha() for part in parts):
-            name = "".join(parts).title()
-        if not any(char.isalpha() for char in name) or any(
-            char not in " ’'‐-.·ʻ" and category(char)[0] not in {"L", "M"} for char in name
-        ):
-            return None
-        return name
-
     def _capture_name(self, text: str, *, confirm: bool = False) -> Reply:
         if self.frontdesk and (identity := self._identity_details(text)):
             supplied_dates = birth_dates(text[identity.end() :], self.scheduling.now().date())
@@ -1239,7 +1148,7 @@ class Call:
             text = re.sub(r"\s+(?:and\s+)?my$", "", text, flags=re.I)
             if match := re.search(r"\b(?:my name is|this is)\b", text, re.I):
                 text = text[match.start() :]
-        name = self._name_candidate(text)
+        name = name_from_reply(text)
         if not name:
             return self.say(
                 "I may have misheard your name. Could you repeat it or spell it for me?"
@@ -1358,10 +1267,8 @@ class Call:
             self.stage = "dob"
             self.dob = None
             return self.say("What's the correct date of birth?")
-        if (
-            INTRODUCED_NAME.search(text)
-            or NAME_INTRO.match(text)
-            or (self.stage == "correct_identity" and answer_to_confirmation(words) is None)
+        if introduces_name(text) or (
+            self.stage == "correct_identity" and answer_to_confirmation(words) is None
         ):
             return self._capture_name(text)
         return self._read_identity()
