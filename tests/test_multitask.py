@@ -39,7 +39,7 @@ def test_reschedule_after_booking_skips_verification(tmp_path):
         [booked] = await clinic.booked()
         reply = await session.say("actually, can I move that appointment")
         assert "name" not in reply.text.lower(), reply.text
-        assert reply.text.startswith("Which existing appointment"), reply.text
+        assert reply.text.startswith("You have one upcoming appointment:"), reply.text
         await session.say("one")
         await session.say("one")
         reply = await session.say("yes")

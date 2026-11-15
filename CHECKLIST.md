@@ -29,7 +29,7 @@ Every phase must keep that baseline green, and must remove the xfail marks for t
   Split outcomes into ones that end the call (emergency, handoff, goodbye) and ones that finish a task. After a finished task, ask "Anything else?" and keep the verified identity. Browser, Vapi and Twilio close only when the call ends. A call trace records several outcomes.
   Done: the call-continuation gap test passes; `tests/test_web.py` and `tests/test_vapi.py` are green.
 
-- [ ] **Phase 7: Double booking and appointment paging.**
+- [x] **Phase 7: Double booking and appointment paging.**
   Slot offers exclude times overlapping the patient's booked appointments (ignoring the one being moved), and the check is repeated at commit. Text mode can page through all appointments; with only one, the caller is asked to confirm it directly.
   Done: the double-booking and third-appointment gap tests pass.
 

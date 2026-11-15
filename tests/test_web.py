@@ -292,7 +292,8 @@ def test_browser_books_and_finds_unseeded_names(tmp_path, monkeypatch, name, ret
                 if outcome == "booked":
                     say("For me.")
                 assert "date of birth" in say(f"My name is {patient_name}")["text"]
-                assert "Option 1" in confirm(say("14th May 1992"))["text"]
+                listed = confirm(say("14th May 1992"))["text"]
+                assert "Option 1" in listed or "one upcoming appointment" in listed
                 proposal = say("option one")
                 if outcome == "booked":
                     assert "What email address" in proposal["text"]

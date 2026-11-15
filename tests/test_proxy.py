@@ -24,7 +24,7 @@ def test_cancel_moms_appointment_end_to_end(tmp_path):
         reply = await session.say("yes")
         assert reply.text == "What's the patient's full name?"
         reply = await verify_patient(session)
-        assert reply.text.startswith("Which of the patient's appointments do you want to change?")
+        assert reply.text.startswith("The patient has one upcoming appointment:"), reply.text
         reply = await session.say("one")
         assert reply.text.startswith("Cancel the patient's appointment on"), reply.text
         reply = await session.say("yes")
@@ -45,7 +45,7 @@ def test_reschedule_for_father_end_to_end(tmp_path):
         assert reply.text == "Do you have permission to change this patient's appointment?"
         await session.say("yes")
         reply = await verify_patient(session)
-        assert "patient's appointments" in reply.text
+        assert reply.text.startswith("The patient has one upcoming appointment:"), reply.text
         await session.say("one")
         assert session.call.options, "no new times offered"
         new_start = session.call.options[0]["start"]
@@ -166,7 +166,7 @@ def test_cancel_my_appointment_is_unchanged(tmp_path):
         reply = await session.say("cancel my appointment")
         assert reply.text == "What name should I use?"
         reply = await session.verify_maria()
-        assert reply.text.startswith("Which existing appointment do you want to change?")
+        assert reply.text.startswith("You have one upcoming appointment:"), reply.text
         reply = await session.say("one")
         assert reply.text.startswith("Cancel your appointment on")
         reply = await session.say("yes")

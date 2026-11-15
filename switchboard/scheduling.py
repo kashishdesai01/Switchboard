@@ -159,9 +159,21 @@ class Scheduling:
         exclude: set[str] | None = None,
         days: tuple[date, ...] = (),
         limit: int = 3,
+        patient: str | None = None,
+        ignore: str | None = None,
     ) -> list[Resource]:
         now = self.now()
         slots = await self.store.search("Slot", status="free", start=f"ge{now.isoformat()}")
+        # The patient's own booked appointments, except the one being rescheduled.
+        booked = (
+            [
+                (instant(item["start"]), instant(item["end"]))
+                for item in await self.appointments(patient, limit=None)
+                if item["id"] != ignore
+            ]
+            if patient is not None
+            else []
+        )
         schedules = {f"Schedule/schedule-{key}" for key in self.clinic.providers}
 
         def in_window(slot: Resource) -> bool:
@@ -207,6 +219,10 @@ class Scheduling:
                 == timedelta(minutes=VISIT_MINUTES[visit])
                 and slot["schedule"]["reference"] in schedules
                 and in_window(slot)
+                and not any(
+                    instant(slot["start"]) < end and start < instant(slot["end"])
+                    for start, end in booked
+                )
                 and (
                     provider is None
                     or slot["schedule"]["reference"] == f"Schedule/schedule-{provider}"
@@ -462,6 +478,15 @@ class Scheduling:
                 or any(slot[key] != hold.slot[key] for key in ("start", "end", "schedule"))
             ):
                 raise Conflict("Hold expired or changed")
+            if change.new_patient is None:
+                # Best effort on FHIR: no lock spans the patient's other appointments.
+                for booked in await self.appointments(change.patient, limit=None):
+                    if (
+                        (change.old is None or booked["id"] != change.old["id"])
+                        and instant(slot["start"]) < instant(booked["end"])
+                        and instant(booked["start"]) < instant(slot["end"])
+                    ):
+                        raise Conflict("Patient already booked at that time")
             provider = slot["schedule"]["reference"].removeprefix("Schedule/schedule-")
             patient_reference = (
                 bundle_patient_reference(change.patient)

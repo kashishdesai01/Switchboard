@@ -266,6 +266,7 @@ class Call:
         self.provider: str | None = None
         self.options: list[Resource] = []
         self.existing_options: list[Resource] = []
+        self.single_existing = False
         self.shown_slots: set[str] = set()
         self.old: Resource | None = None
         self.change: Change | None = None
@@ -583,6 +584,11 @@ class Call:
                     or (
                         self.stage in {"select_slot", "select_existing"}
                         and self._selection(words) is not None
+                    )
+                    or (
+                        self.stage == "select_existing"
+                        and self.single_existing
+                        and answer_to_confirmation(words) is not None
                     )
                 )
                 if (
@@ -1274,6 +1280,7 @@ class Call:
         self.requested_time = self.after = self.before = None
         self.location = self.service = self.provider = None
         self.options, self.existing_options, self.shown_slots = [], [], set()
+        self.single_existing = False
         self.old = None
         self.pending_email = self.staff_topic = None
         self.pending_request = None
@@ -1650,18 +1657,31 @@ class Call:
             return self.say(
                 "I couldn't find an active coverage record. Staff can verify it.", outcome="handoff"
             )
-        self.options = await self.scheduling.appointments(
-            self._patient(), limit=None if self.voice else 2
-        )
-        if self.voice:
-            self.options, self.existing_options = self.options[:2], self.options[2:]
+        appointments = await self.scheduling.appointments(self._patient(), limit=None)
+        page = self._existing_page()
+        self.options, self.existing_options = appointments[:page], appointments[page:]
+        self.single_existing = len(appointments) == 1
         if not self.options:
             return self.say("I found no upcoming appointments to change.", outcome="info_only")
         self.stage = "select_existing"
+        if self.single_existing:
+            return self._read_single_existing()
         return self._list_options(
             "Which of the patient's appointments do you want to change?"
             if self.party.proxy
             else "Which existing appointment do you want to change?"
+        )
+
+    def _existing_page(self) -> int:
+        return 2 if self.voice else 3
+
+    def _read_single_existing(self, prefix: str = "") -> Reply:
+        whose = "The patient has" if self.party.proxy else "You have"
+        action = self.intent if self.intent in {"reschedule", "cancel"} else "change"
+        return self.say(
+            f"{prefix}{whose} one upcoming appointment: {self.describe(self.options[0])}. "
+            f"Do you want to {action} it?",
+            calendar=self._calendar(self.options, "offered"),
         )
 
     def _list_options(self, lead: str) -> Reply:
@@ -1753,6 +1773,9 @@ class Call:
             exclude=self.shown_slots,
             days=self.days,
             limit=2 if self.voice else 3,
+            # A new-patient draft has no appointments to avoid.
+            patient=None if self.new_patient else self.patient,
+            ignore=self.old["id"] if self.old else None,
         )
         self.shown_slots.update(slot["id"] for slot in self.options)
         self.stage = "select_slot"
@@ -1924,17 +1947,37 @@ class Call:
     async def _select_existing(
         self, text: str, words: str, meaning: TurnMeaning | None = None
     ) -> Reply:
-        if self.voice and (MORE_TIMES.search(words) or (meaning and meaning.action == "more")):
-            if self.existing_options:
-                self.options, self.existing_options = (
-                    self.existing_options[:2],
-                    self.existing_options[2:],
-                )
-                return self._list_options("Here are more appointments.")
-            return self._list_options("These are the last appointments I found.")
-        self.old = self._choose_option(text, words, existing=True, meaning=meaning)
-        if self.old is None:
-            return self.say("Please say the option number.")
+        more = (
+            MORE_TIMES.search(words)
+            or re.fullmatch(r"(?:(?:any|some) )?more(?: appointments)?(?: please)?", words)
+            or (meaning and meaning.action == "more")
+        )
+        if self.single_existing:
+            if more:
+                return self._read_single_existing("These are the last appointments I found. ")
+            answer = answer_to_confirmation(words, self.intent) or self._context_answer(
+                words, meaning
+            )
+            if answer == "no":
+                return self.say("Okay. I haven't made any changes.", outcome="declined")
+            # "One", "option one" and "the first one" name the only appointment.
+            if answer == "yes" or self._selection(words) is not None:
+                self.old = self.options[0]
+            else:
+                return self._read_single_existing("Please say yes or no. ")
+        else:
+            if more:
+                if self.existing_options:
+                    page = self._existing_page()
+                    self.options, self.existing_options = (
+                        self.existing_options[:page],
+                        self.existing_options[page:],
+                    )
+                    return self._list_options("Here are more appointments.")
+                return self._list_options("These are the last appointments I found.")
+            self.old = self._choose_option(text, words, existing=True, meaning=meaning)
+            if self.old is None:
+                return self.say("Please say the option number.")
         if not self.scheduling.can_change(self.old):
             return self.say(
                 "This appointment is too close to change here. Please contact staff.",

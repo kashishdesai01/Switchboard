@@ -1,10 +1,7 @@
-"""Gaps found in the 2026-11-15 review, locked in as strict expected failures.
+"""Gaps found in the 2026-11-15 review, kept as regression tests now that they are closed.
 
-Each gap test asserts the target behavior, so it fails today and starts passing
-once the phase that closes the gap lands. That phase removes the xfail mark.
-``raises=AssertionError`` keeps harness errors visible: only a failed behavior
-assertion counts as the expected failure. Harness preconditions use
-``require`` so that a broken setup fails the test instead of hiding in xfail.
+Each gap test asserts the target behavior. Harness preconditions use ``require``
+so that a broken setup raises a harness error instead of a behavior failure.
 """
 
 import asyncio
@@ -28,10 +25,6 @@ CLOCK = datetime(2026, 11, 10, 16, tzinfo=UTC)
 TODAY = CLOCK.astimezone(BAYVIEW.timezone).date()
 MARIA = ("Maria Lopez", "July 2 1984")
 ORDINALS = ("one", "two", "three")
-
-
-def gap(reason: str) -> pytest.MarkDecorator:
-    return pytest.mark.xfail(strict=True, raises=AssertionError, reason=reason)
 
 
 class HarnessError(RuntimeError):
@@ -186,7 +179,7 @@ def test_control_reschedule(tmp_path):
         session = clinic.session()
         await session.say("reschedule my appointment")
         reply = await session.verify_maria()
-        assert "Option 1" in reply.text
+        assert reply.text.startswith("You have one upcoming appointment:"), reply.text
         await session.say("one")
         require(session.call.options, "no new times offered")
         new_start = session.call.options[0]["start"]
@@ -344,7 +337,6 @@ def simultaneous_follow_up(clinic: Clinic) -> tuple[Resource, Resource]:
     return first, second
 
 
-@gap("offers include times that overlap the patient's own booked appointment")
 def test_no_double_booking(tmp_path):
     async def scenario():
         clinic = Clinic(tmp_path)
@@ -368,7 +360,6 @@ def test_no_double_booking(tmp_path):
     run(scenario())
 
 
-@gap("text mode lists two appointments and cannot page to the third")
 def test_third_appointment_reachable_in_text(tmp_path):
     async def scenario():
         clinic = Clinic(tmp_path, existing=3)
