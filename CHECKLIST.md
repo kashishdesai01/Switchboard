@@ -33,6 +33,6 @@ Every phase must keep that baseline green, and must remove the xfail marks for t
   Slot offers exclude times overlapping the patient's booked appointments (ignoring the one being moved), and the check is repeated at commit. Text mode can page through all appointments; with only one, the caller is asked to confirm it directly.
   Done: the double-booking and third-appointment gap tests pass.
 
-- [ ] **Phase 8: Finish splitting `conversation.py`.**
+- [x] **Phase 8: Finish splitting `conversation.py`.**
   Move the stage handlers into modules, without changing behavior.
   Done: no file under `switchboard/` exceeds 700 lines; `tests/test_gaps.py` has no xfail marks left; baseline green.
