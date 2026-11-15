@@ -124,11 +124,11 @@ class Clinic:
         self.frontdesk = FrontDesk(self.ops, MailSettings())
         self.ops.frontdesk = self.frontdesk
 
-    def session(self, *, proxy_booking_allowed: bool | None = None) -> Session:
+    def session(self, *, proxy_allowed: bool | None = None) -> Session:
         trace = self.ops.start("test")
         call = Call(self.scheduling, None, trace, allow_registration=True, frontdesk=self.frontdesk)
-        if proxy_booking_allowed is not None:
-            call.proxy_booking_allowed = proxy_booking_allowed
+        if proxy_allowed is not None:
+            call.proxy_allowed = proxy_allowed
         return Session(call, trace, call.greeting())
 
     async def booked(self) -> list[Resource]:
@@ -243,7 +243,6 @@ def test_calling_for_father_asks_permission(tmp_path):
     run(scenario())
 
 
-@gap("a possessive proxy cancel ('my mom's appointment') goes straight to identity questions")
 def test_cancel_moms_appointment_asks_permission(tmp_path):
     async def scenario():
         session = Clinic(tmp_path).session()
@@ -254,7 +253,6 @@ def test_cancel_moms_appointment_asks_permission(tmp_path):
     run(scenario())
 
 
-@gap("'cancel the appointment for my mom' hands off instead of asking for permission")
 def test_cancel_for_mom_asks_permission(tmp_path):
     async def scenario():
         session = Clinic(tmp_path).session()
@@ -265,10 +263,9 @@ def test_cancel_for_mom_asks_permission(tmp_path):
     run(scenario())
 
 
-@gap("the staff work item for a proxy cancel records request 'book' instead of 'cancel'")
 def test_proxy_cancel_work_item_records_cancel(tmp_path):
     async def scenario():
-        session = Clinic(tmp_path).session(proxy_booking_allowed=False)
+        session = Clinic(tmp_path).session(proxy_allowed=False)
         await session.say("I need to cancel the appointment for my mom")
         # Accept any offer to pass the request to the front desk.
         for _ in range(3):

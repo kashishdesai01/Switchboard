@@ -8,7 +8,7 @@ from collections import deque
 from dataclasses import dataclass, replace
 from datetime import date, time, timedelta
 from time import monotonic
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from switchboard.frontdesk import email_address
@@ -37,6 +37,7 @@ from switchboard.spoken import (
 )
 from switchboard.store import Conflict, DemoStore, Resource, Unavailable
 from switchboard.understanding import (
+    Proxy,
     answer_to_confirmation,
     booking_recipient,
     introduces_name,
@@ -138,7 +139,31 @@ CONFIRMATION_STAGES = {
     "confirm_change",
     "other_provider",
     "day_alternative",
-    "proxy_booking",
+    "proxy_permission",
+}
+
+
+@dataclass
+class Party:
+    """Who the call is about. The caller is not always the patient.
+
+    patient is "self" when the caller is the patient, "other" when they act for
+    someone else, and "unknown" until the opening or an answer settles it.
+    """
+
+    patient: Literal["self", "other", "unknown"] = "unknown"
+    relation: str | None = None
+    name: str | None = None
+
+    @property
+    def proxy(self) -> bool:
+        return self.patient == "other"
+
+
+PROXY_ACTIONS = {
+    "book": ("book a visit for this patient", "booking"),
+    "reschedule": ("change this patient's appointment", "change"),
+    "cancel": ("cancel this patient's appointment", "cancellation"),
 }
 
 
@@ -171,15 +196,17 @@ class Call:
         self.scheduling = scheduling
         self.interpreter = router
         self.allow_registration = allow_registration
-        self.proxy_booking_allowed = bool(frontdesk and isinstance(scheduling.store, DemoStore))
-        self.booking_for_other = False
+        # Changes for someone else are handled here only in the SQLite demo with a
+        # front desk. Elsewhere the request goes to staff. Applies to every action.
+        self.proxy_allowed = bool(frontdesk and isinstance(scheduling.store, DemoStore))
+        self.party = Party()
         self.frontdesk = frontdesk
         self.email_form = email_form
         self.stage = "intent"
         self.safety_resume: Reply | None = None
         self.safety_opening: str | None = None
         self.safety_retries = 0
-        self.pending_booking: tuple[str, str, TurnMeaning | None] | None = None
+        self.pending_request: tuple[str, str, TurnMeaning | None] | None = None
         self.patient: str | None = None
         self.name = ""
         self.dob: date | None = None
@@ -255,7 +282,7 @@ class Call:
                     self._work(reason)
             if (
                 self.staff_topic
-                and self.staff_topic != "proxy booking"
+                and self.staff_topic != "proxy request"
                 and outcome in {"booked", "declined", "abandoned"}
             ):
                 self._work("staff_requested")
@@ -276,6 +303,12 @@ class Call:
                 context["operation"] = self.last_operation
             if self.staff_topic:
                 context["topic"] = self.staff_topic
+            if self.party.proxy:
+                context["patient"] = "other"
+                if self.party.relation:
+                    context["relation"] = self.party.relation
+                if self.party.name:
+                    context["patient_name"] = self.party.name
             self.trace.work = reason, context
 
     def _handoff(self, reason: str, message: str) -> Reply:
@@ -418,22 +451,34 @@ class Call:
                     )
                 staff = STAFF_TOPIC.search(words)
                 proxy = proxy_request(words)
-                if proxy and proxy.form == "possessive":
-                    # "my mom's appointment" keeps today's handling until proxy policy covers it.
-                    proxy = None
                 book_request = is_booking_request(words)
                 booking = self.stage == "intent" and (
                     book_request or (not staff and bool(meaning and meaning.action == "book"))
                 )
-                if booking and self.frontdesk and not EXPLICIT_STAFF.search(words):
-                    if proxy:
-                        if self.proxy_booking_allowed:
-                            self.pending_booking = (words, text, meaning)
-                        else:
-                            self._set_window(words)
-                        return self._ask_proxy_permission()
+                proxy_action = self._proxy_action(words, meaning, proxy, booking, staff)
+                if proxy_action and proxy:
+                    # Set before any handoff so staff work records the real request.
+                    self.intent = proxy_action
+                    self.party = Party("other", proxy.relation)
                 if (
-                    self.stage in {"booking_recipient", "proxy_booking"}
+                    proxy_action
+                    and self.frontdesk
+                    and words != "0"
+                    and not EXPLICIT_STAFF.search(words)
+                ):
+                    if self.proxy_allowed:
+                        self.pending_request = (words, text, meaning)
+                    else:
+                        self._set_window(words)
+                    return self._ask_proxy_permission()
+                if proxy and (
+                    # A possessive ("my mom's appointment") only starts the flow above, and
+                    # a proxy call already in progress may mention the patient again.
+                    proxy.form == "possessive" or (self.party.proxy and self.stage != "intent")
+                ):
+                    proxy = None
+                if (
+                    self.stage in {"booking_recipient", "proxy_permission"}
                     and words != "0"
                     and not EXPLICIT_STAFF.search(words)
                 ):
@@ -640,14 +685,42 @@ class Call:
             return "yes"
         return None
 
-    def _ask_proxy_permission(self) -> Reply:
-        self.stage = "proxy_booking"
-        if self.proxy_booking_allowed:
-            return self.say("Do you have permission to book a new visit for this patient?")
-        self.staff_topic = "proxy booking"
+    def _proxy_action(
+        self,
+        words: str,
+        meaning: TurnMeaning | None,
+        proxy: Proxy | None,
+        booking: bool,
+        staff: re.Match | None,
+    ) -> str | None:
+        """The request an opening makes for someone else: book, reschedule or cancel."""
+        if self.stage != "intent" or not proxy:
+            return None
+        if booking:
+            return "book"
+        if staff:
+            return None
+        route = (
+            meaning.action
+            if meaning and meaning.action in {"reschedule", "cancel"}
+            else request_route(words)
+        )
+        return route if route in {"reschedule", "cancel"} else None
+
+    def _ask_proxy_permission(self, prefix: str = "") -> Reply:
+        self.stage = "proxy_permission"
+        self.unclear = 0
+        if self.proxy_allowed:
+            return self.say(f"{prefix}Do you have permission to {PROXY_ACTIONS[self.intent][0]}?")
+        self.staff_topic = "proxy request"
+        if self.intent == "book":
+            return self.say(
+                "The front desk can help book visits for someone else. "
+                "Would you like me to send them your scheduling request?"
+            )
         return self.say(
-            "The front desk can help book visits for someone else. "
-            "Would you like me to send them your scheduling request?"
+            "The front desk can help change appointments for someone else. "
+            f"Would you like me to send them your {PROXY_ACTIONS[self.intent][1]} request?"
         )
 
     async def _handle(self, text: str, words: str, meaning: TurnMeaning | None = None) -> Reply:
@@ -660,52 +733,70 @@ class Call:
             case "booking_recipient":
                 recipient = booking_recipient(text)
                 if action == "other" or recipient.kind == "other":
-                    if not self.proxy_booking_allowed:
-                        self.pending_booking = None
+                    said = proxy_request(words)
+                    self.party = Party("other", said.relation if said else None, recipient.name)
+                    if not self.proxy_allowed:
+                        self.pending_request = None
                     return self._ask_proxy_permission()
                 if recipient.kind == "self" or (action == "self" and model_says_self(text, value)):
-                    assert self.pending_booking is not None
-                    opening_words, opening_text, opening_meaning = self.pending_booking
-                    self.pending_booking = None
+                    assert self.pending_request is not None
+                    opening_words, opening_text, opening_meaning = self.pending_request
+                    self.pending_request = None
+                    self.party = Party("self")
                     return await self._start(
-                        opening_words, opening_text, opening_meaning, recipient_confirmed=True
+                        opening_words, opening_text, opening_meaning, patient_confirmed=True
                     )
                 self.unclear += 1
                 if self.unclear >= 3:
-                    self.pending_booking = None
+                    self.pending_request = None
                     return self._handoff(
                         "staff_requested",
                         "I couldn't confirm who the appointment is for. The front desk can help.",
                     )
                 return self.say("Is the appointment for you or for someone else?")
-            case "proxy_booking":
-                if self.proxy_booking_allowed:
+            case "proxy_permission":
+                if self.proxy_allowed:
                     if answer_to_confirmation(words) == "no":
-                        self.pending_booking = None
-                        return self.say("Okay. I haven't booked anything.", outcome="declined")
-                    if answer_to_confirmation(words, "book") == "yes":
-                        assert self.pending_booking is not None
-                        opening_words, opening_text, opening_meaning = self.pending_booking
-                        self.pending_booking = None
-                        self.booking_for_other = True
-                        self.name, self.dob = "", None
+                        self.pending_request = None
+                        return self.say("Okay. I haven't made any changes.", outcome="declined")
+                    if answer_to_confirmation(words, self.intent) == "yes":
+                        assert self.pending_request is not None
+                        opening_words, opening_text, opening_meaning = self.pending_request
+                        self.pending_request = None
+                        # Identity questions now refer to the patient, not the caller.
+                        self.name, self.dob = self.party.name or "", None
                         return await self._start(
-                            opening_words, opening_text, opening_meaning, recipient_confirmed=True
+                            opening_words, opening_text, opening_meaning, patient_confirmed=True
+                        )
+                    self.unclear += 1
+                    if self.unclear >= 3:
+                        self.pending_request = None
+                        return self._handoff(
+                            "staff_requested",
+                            "I couldn't confirm permission for this patient. The front desk can help.",
                         )
                     return self.say(
-                        "Do you have permission to book for the patient? Please say yes or no."
+                        f"Do you have permission to {PROXY_ACTIONS[self.intent][0]}? "
+                        "Please say yes or no."
                     )
+                request = PROXY_ACTIONS[self.intent][1]
                 if answer == "yes":
                     return self._handoff(
-                        "staff_requested", "I'll pass your booking request to the front desk."
+                        "staff_requested", f"I'll pass your {request} request to the front desk."
                     )
                 if answer == "no":
                     return self.say("Okay. I haven't sent a request.", outcome="declined")
-                if await self._update_preferences(words):
+                if self.intent != "cancel" and await self._update_preferences(words):
                     return self.say(
                         "I have your scheduling preferences. Should I send this request to the front desk?"
                     )
-                return self.say("Should I send the front desk your booking request?")
+                self.unclear += 1
+                if self.unclear >= 3:
+                    return self._handoff(
+                        "staff_requested",
+                        "I couldn't confirm your answer. The front desk can help.",
+                    )
+                return self.say(f"Should I send the front desk your {request} request?")
             case "other_provider":
                 self.provider = self._provider(words) or (
                     self._provider(value.casefold()) if action == "preferences" else None
@@ -730,10 +821,15 @@ class Call:
                     self.stage = "dob"
                     return self.say(
                         "What's the patient's date of birth?"
-                        if self.booking_for_other
+                        if self.party.proxy
                         else "Thanks. What's your date of birth?"
                     )
-                if answer == "no" or words in {"change it", "change my name", "the name"}:
+                if answer == "no" or words in {
+                    "change it",
+                    "change my name",
+                    "change the name",
+                    "the name",
+                }:
                     self.name = ""
                     return self._ask_name()
                 if states_name(text):
@@ -926,9 +1022,9 @@ class Call:
         text: str,
         meaning: TurnMeaning | None = None,
         *,
-        recipient_confirmed: bool = False,
+        patient_confirmed: bool = False,
     ) -> Reply:
-        if not recipient_confirmed:
+        if not patient_confirmed:
             if (
                 self.frontdesk
                 and re.search(r"\b(locations?|where are you|addresses)\b", words)
@@ -948,8 +1044,8 @@ class Call:
                 self.intent = "coverage"
                 return self._ask_name()
         intent = (
-            "book"
-            if recipient_confirmed
+            self.intent
+            if patient_confirmed
             else meaning.action
             if meaning and meaning.action in {"book", "reschedule", "cancel", "insurance"}
             else "book"
@@ -991,7 +1087,7 @@ class Call:
                     "You can also ask for the front desk."
                 )
             self.opening_interpreter_failures = 0
-            if self.frontdesk and not self.booking_for_other and (name := opening_name(text)):
+            if self.frontdesk and not self.party.proxy and (name := opening_name(text)):
                 self.name = name
             self.unclear += 1
             if self.frontdesk and self.unclear >= 3:
@@ -1001,14 +1097,18 @@ class Call:
             return self.say(
                 "I'm listening. Are you looking to book or change an appointment, or ask about insurance?"
             )
-        if intent == "book" and not recipient_confirmed:
-            self.pending_booking = (words, text, meaning)
+        if intent == "book" and not patient_confirmed:
+            self.intent = "book"
+            self.pending_request = (words, text, meaning)
             self.unclear = 0
             self.stage = "booking_recipient"
             return self.say("Is the appointment for you or for someone else?")
-        if self.frontdesk and not self.booking_for_other and (name := opening_name(text)):
+        if self.frontdesk and not self.party.proxy and (name := opening_name(text)):
             self.name = name
         self.intent = intent
+        if not self.party.proxy:
+            # Without a proxy cue the caller is the patient, as before.
+            self.party.patient = "self"
         self.unclear = 0
         self.visit = (
             "first visit" if re.search(r"\b(first visit|new patient)\b", words) else "follow-up"
@@ -1044,7 +1144,7 @@ class Call:
                 f"Dr. {requested.title()} isn't on the schedule for "
                 f"{self.scheduling.clinic.name}. Would you like to hear times with another doctor here?"
             )
-        if identity and not self.booking_for_other:
+        if identity and not self.party.proxy:
             self.stage = "name"
             return self._capture_name(text[identity_start:])
         return self._ask_name()
@@ -1152,7 +1252,7 @@ class Call:
         }
 
     async def _join_waitlist(self) -> Reply:
-        if self.booking_for_other:
+        if self.party.proxy:
             return self.say(
                 "The front desk can help with the patient's waitlist. "
                 "Would you like to choose an appointment time?"
@@ -1195,15 +1295,19 @@ class Call:
     def _ask_name(self) -> Reply:
         if self.name:
             self.stage = "check_name"
+            if self.party.proxy:
+                return self.say(
+                    f"I heard the patient's name as {self.name}. Is that correct? "
+                    "You can also say change the name.",
+                    confirm=True,
+                )
             return self.say(
                 f"I heard your name as {self.name}. Is that correct? You can also say change my name.",
                 confirm=True,
             )
         self.stage = "name"
         return self.say(
-            "What's the patient's full name?"
-            if self.booking_for_other
-            else "What name should I use?"
+            "What's the patient's full name?" if self.party.proxy else "What name should I use?"
         )
 
     def _capture_name(self, text: str, *, confirm: bool = False) -> Reply:
@@ -1230,7 +1334,7 @@ class Call:
         self.stage = "dob"
         return self.say(
             "What's the patient's date of birth?"
-            if self.booking_for_other
+            if self.party.proxy
             else "Thanks. What's your date of birth?"
         )
 
@@ -1389,7 +1493,11 @@ class Call:
                     "I couldn't verify those details. Please contact staff.",
                 )
             self.stage = "name"
-            return self.say("I couldn't verify those details. Please repeat your full name.")
+            return self.say(
+                "I couldn't verify those details. Please repeat the patient's full name."
+                if self.party.proxy
+                else "I couldn't verify those details. Please repeat your full name."
+            )
         if self.intent == "book":
             return await self._offer()
         if self.intent == "coverage":
@@ -1410,7 +1518,11 @@ class Call:
         if not self.options:
             return self.say("I found no upcoming appointments to change.", outcome="info_only")
         self.stage = "select_existing"
-        return self._list_options("Which existing appointment do you want to change?")
+        return self._list_options(
+            "Which of the patient's appointments do you want to change?"
+            if self.party.proxy
+            else "Which existing appointment do you want to change?"
+        )
 
     def _list_options(self, lead: str) -> Reply:
         options = " ".join(
@@ -1699,21 +1811,18 @@ class Call:
     def _read_change(self, prefix: str = "") -> Reply:
         change = self.change
         assert change is not None
+        whose = "the patient's" if self.party.proxy else "your"
         if change.action == "cancel":
             assert change.old is not None
-            text = f"Cancel your appointment on {self.describe(change.old)}?"
+            text = f"Cancel {whose} appointment on {self.describe(change.old)}?"
         else:
             assert change.hold is not None
             time = self.describe(change.hold.slot)
             if change.action == "reschedule":
                 assert change.old is not None
-                text = f"Move your appointment from {self.describe(change.old)} to {time}?"
+                text = f"Move {whose} appointment from {self.describe(change.old)} to {time}?"
             else:
-                visit = (
-                    f"the patient's {self.visit}"
-                    if self.booking_for_other
-                    else f"your {self.visit}"
-                )
+                visit = f"{whose} {self.visit}"
                 text = f"Book {visit} on {time}?"
                 if change.new_patient is not None:
                     text = f"Create a new demo patient record and book {visit} on {time}?"
@@ -1724,7 +1833,7 @@ class Call:
         )
 
     async def _prepare_confirmation(self) -> Reply:
-        if self.frontdesk and not self.email_checked and not self.booking_for_other:
+        if self.frontdesk and not self.email_checked and not self.party.proxy:
             stored = (
                 await self.scheduling.email_on_file(self._patient())
                 if not self.new_patient
@@ -1779,7 +1888,7 @@ class Call:
 
     async def _confirm(self, words: str, meaning: TurnMeaning | None = None) -> Reply:
         action = meaning.action if meaning else ""
-        if action == "email_question" and self.intent != "cancel" and not self.booking_for_other:
+        if action == "email_question" and self.intent != "cancel" and not self.party.proxy:
             message = (
                 "I'll use the email address we confirmed if you go ahead."
                 if self.email_on_file
@@ -1788,7 +1897,7 @@ class Call:
             return self._read_change(message + " ")
         if (
             self.frontdesk
-            and not self.booking_for_other
+            and not self.party.proxy
             and self.intent != "cancel"
             and (
                 action == "change_email"
@@ -1849,7 +1958,7 @@ class Call:
                 "telecom": [{"system": "email", "value": self.email_on_file}],
             }
             change = replace(change, new_patient=patient)
-        if self.frontdesk and not self.booking_for_other:
+        if self.frontdesk and not self.party.proxy:
             try:
                 details = ""
                 if change.hold:
@@ -1891,7 +2000,7 @@ class Call:
         if change.hold:
             delivery = None
             email_note = ""
-            if self.frontdesk and not self.booking_for_other:
+            if self.frontdesk and not self.party.proxy:
                 try:
                     delivery = await self.frontdesk.activate_notice(change.operation)
                 except sqlite3.Error:
@@ -1906,8 +2015,8 @@ class Call:
                     email_note = " The front desk can check your confirmation email status."
             return self.say(
                 (
-                    f"The patient is booked for {self.describe(change.hold.slot)}."
-                    if self.booking_for_other
+                    f"The patient is {outcome} for {self.describe(change.hold.slot)}."
+                    if self.party.proxy
                     else f"You're {outcome} for {self.describe(change.hold.slot)}."
                 )
                 + email_note,
@@ -1915,4 +2024,9 @@ class Call:
                 calendar=self._calendar([change.hold.slot], "booked"),
                 email_status=delivery if self.email_form else None,
             )
-        return self.say("Your appointment was cancelled.", outcome=outcome)
+        return self.say(
+            "The patient's appointment was cancelled."
+            if self.party.proxy
+            else "Your appointment was cancelled.",
+            outcome=outcome,
+        )

@@ -21,7 +21,7 @@ Every phase must keep that baseline green, and must remove the xfail marks for t
   Add the emergency notice to the greeting and a script for each level. Unclear answers to the clarifying question escalate. A separate safety check by the model runs on every turn and can only raise the level. Emergency and urgent results create an urgent work item and transfer to staff when possible.
   Done: new tests for each behavior pass; baseline green.
 
-- [ ] **Phase 5: Separate caller and patient.**
+- [x] **Phase 5: Separate caller and patient.**
   Session state records caller and patient separately. Book, reschedule and cancel all ask who the patient is and get permission when the caller isn't the patient. Proxy policy is set per backend in the clinic config. Prompts say "the patient", and staff work items record the real request type.
   Done: the proxy gap tests pass, including the possessive and "for my mom" phrasings behaving the same way.
 

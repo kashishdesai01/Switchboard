@@ -311,7 +311,7 @@ def test_recipient_answer_does_not_skip_handoff_consent_on_model_misclassificati
     call = PhoneCall(client)
     assert "for you or for someone else" in call.say("Can I book an appointment?")
     assert "permission" in call.say("For him.").lower()
-    assert "haven't booked" in call.say("No, thank you.")
+    assert "haven't made any changes" in call.say("No, thank you.")
 
 
 def spoken_confirmation(prompt):
