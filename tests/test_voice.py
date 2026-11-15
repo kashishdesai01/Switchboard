@@ -56,7 +56,7 @@ def test_twilio_clear_mark_cannot_authorize_and_late_vad_is_unsafe(tmp_path):
         store = DemoStore(tmp_path / "voice.sqlite")
         store.seed(synthetic_resources(BAYVIEW, utc_now()))
         call = Call(Scheduling(store, BAYVIEW))
-        for text in ["book", "Maria Lopez"]:
+        for text in ["book", "For me.", "Maria Lopez"]:
             await call.handle(text)
         dob = await call.handle("1984-07-02")
         call.playback_finished(dob.id)
@@ -188,7 +188,7 @@ def test_speech_drop_requires_a_fresh_readback(tmp_path):
         store = DemoStore(tmp_path / "consent.sqlite")
         store.seed(synthetic_resources(BAYVIEW, utc_now()))
         call = Call(Scheduling(store, BAYVIEW))
-        for text in ["book", "Maria Lopez"]:
+        for text in ["book", "For me.", "Maria Lopez"]:
             await call.handle(text)
         dob = await call.handle("1984-07-02")
         call.playback_finished(dob.id)
@@ -291,6 +291,7 @@ def test_emergency_preempts_a_slow_turn_and_clears_filler(tmp_path, monkeypatch)
         store = DemoStore(tmp_path / "slow.sqlite")
         call = Call(SlowScheduling(store, BAYVIEW))
         await call.handle("book")
+        await call.handle("For me.")
         await call.handle("Maria Lopez")
         prompt = await call.handle("1984-07-02")
         call.playback_finished(prompt.id)
@@ -359,7 +360,7 @@ def test_hangup_after_booking_commit_reconciles_instead_of_releasing_slot(tmp_pa
         ops = Operations(tmp_path / "operations.sqlite", "bayview@1")
         trace = ops.start("twilio")
         call = Call(scheduler, trace=trace)
-        for text in ["book", "Maria Lopez"]:
+        for text in ["book", "For me.", "Maria Lopez"]:
             await call.handle(text)
         dob = await call.handle("1984-07-02")
         call.playback_finished(dob.id)
@@ -423,5 +424,69 @@ def test_synthesis_uses_json_and_rejects_non_audio_responses():
             with pytest.raises(httpx.DecodingError):
                 async for _ in provider.synthesize(FILLER_TEXT):
                     pytest.fail("A non-audio response reached playback")
+
+    asyncio.run(run())
+
+
+def test_queued_yes_requires_a_fresh_readback_and_queued_preference_is_kept(tmp_path):
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        class SlowScheduling(Scheduling):
+            async def hold(self, slot):
+                entered.set()
+                await release.wait()
+                return await super().hold(slot)
+
+        store = DemoStore(tmp_path / "queued.sqlite")
+        store.seed(synthetic_resources(BAYVIEW, utc_now()))
+        call = Call(SlowScheduling(store, BAYVIEW), voice=True)
+        await call.handle("Can I come in next week?")
+        await call.handle("For me.")
+        await call.handle("Maria Lopez")
+        identity = await call.handle("zero seven zero two eight four")
+        call.playback_finished(identity.id)
+        await call.handle("Yep, that's me")
+        media = FakeMedia()
+        replies = []
+        caller = []
+
+        async def on_reply(reply):
+            replies.append(reply)
+
+        async def on_caller(text):
+            caller.append(text)
+
+        voice = VoiceCall(call, media, FakeTts(), on_reply=on_reply, on_caller=on_caller)
+        loop = asyncio.create_task(voice._loop())
+        try:
+            async with asyncio.timeout(3):
+                await voice.events.put(Speech("final", "the first one"))
+                await entered.wait()
+                await voice.events.put(Speech("final", "yes"))
+                await voice.events.put(Speech("final", "Anything closer to lunch?"))
+                # Give the media loop one explicit barrier after both finals.
+                await voice.events.put(Speech("start"))
+                await asyncio.sleep(0)
+                release.set()
+
+                for expected_confirmation in (True, True, False):
+                    assert (await media.outbound.get())[0] == "audio"
+                    _, mark = await media.outbound.get()
+                    assert replies[-1].confirmation is expected_confirmation
+                    await voice.events.put(Speech("mark", mark))
+
+                assert caller == ["the first one", "yes", "Anything closer to lunch?"]
+                assert len(call.options) == 2
+                assert "Option 3" not in replies[-1].text
+                assert "12:00" not in replies[-1].text
+                assert call.requested_time.hour == 12
+                assert not await store.search("Appointment")
+                await voice.events.put(Speech("hangup"))
+                assert await loop == "hangup"
+        finally:
+            loop.cancel()
+            await asyncio.gather(loop, return_exceptions=True)
+            await call.close()
 
     asyncio.run(run())

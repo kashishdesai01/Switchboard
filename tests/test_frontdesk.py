@@ -50,6 +50,7 @@ def test_opening_name_today_alternatives_and_conversational_consent(desk, monkey
     monkeypatch.setattr(app.state.scheduling, "now", lambda: after_close)
     with conversation(desk) as say:
         name = say("Hi. My name is Asha Mercer. Can I book with the doctor today?")
+        name = say("For me.")
         assert "I heard your name as Asha Mercer" in name["text"]
         assert "date of birth" in say("Yeah. Sure.", name["id"])["text"]
         identity = say("18 February 1993")
@@ -77,7 +78,8 @@ def test_opening_name_today_alternatives_and_conversational_consent(desk, monkey
 
 def test_unknown_provider_and_sentence_like_name_recovery(desk):
     with conversation(desk) as say:
-        assert "Dr. Rivera" in say("Book with Doctor Rivera next week")["text"]
+        assert "for you" in say("Book with Doctor Rivera next week")["text"]
+        assert "Dr. Rivera" in say("For me.")["text"]
         assert "another doctor" in say("I haven't decided yet")["text"]
         assert "What name" in say("Yeah. Sure.")["text"]
         invalid = say("That should stay safe.")
@@ -92,6 +94,7 @@ def test_opening_name_survives_a_transcript_split_before_the_request(desk):
     with conversation(desk) as say:
         say("Hi, my name is Tariq Sandoval.")
         reply = say("Can I book with the doctor tomorrow?")
+        reply = say("For me.")
         assert "I heard your name as Tariq Sandoval" in reply["text"]
         assert reply["confirmation"]
 
@@ -102,6 +105,7 @@ def test_booking_and_reschedule_notices_follow_committed_calendar(desk):
             "Book next week at Downtown. My name is Theo Van Buren and my date of birth is "
             "the 17th of March 1990."
         )
+        initial = say("For me.")
         assert "Theo Van Buren, born March 17, 1990" in initial["text"]
         offered = say("yes", initial["id"])
         assert offered["calendar"][0]["state"] == "offered"
@@ -147,6 +151,7 @@ def test_booking_and_reschedule_notices_follow_committed_calendar(desk):
 def test_referral_eligibility_and_actionable_staff_queue(desk):
     with conversation(desk) as say:
         say("I'd like to see a spine specialist")
+        say("For me.")
         denied = verify(say, dob="February 14, 1991")
         assert denied["outcome"] == "handoff"
         assert "requires a referral" in denied["text"]
@@ -179,6 +184,7 @@ def test_referral_eligibility_and_actionable_staff_queue(desk):
 
     with conversation(desk) as say:
         say("Can you schedule a spine consultation next week?")
+        say("For me.")
         approved = verify(say)
         assert approved["calendar"]
         assert all("Dr. Priya Patel" in slot["label"] for slot in approved["calendar"])
@@ -190,6 +196,7 @@ def test_waitlist_offer_matches_released_slot_and_is_idempotent(desk):
     target = monday.strftime("%B %d")
     with conversation(desk) as say:
         say(f"Book a follow-up on {target} at Downtown after ten")
+        say("For me.")
         options = verify(say)
         chosen = say("option one")
         assert options["calendar"][0]["start"] == chosen["calendar"][0]["start"]
@@ -197,6 +204,7 @@ def test_waitlist_offer_matches_released_slot_and_is_idempotent(desk):
 
     with conversation(desk) as say:
         say(f"Book a follow-up on {target} at Downtown after ten")
+        say("For me.")
         verify(say, dob="February 14, 1991")
         assert say("Please add me to the waitlist")["outcome"] == "waitlisted"
 
@@ -226,6 +234,7 @@ def test_smtp_worker_delivers_once_automatically(desk, monkeypatch):
     )
     with conversation(desk) as say:
         say("Book a follow-up next week")
+        say("For me.")
         verify(say)
         proposal = say("one")
         assert "email on file" in proposal["text"]
@@ -244,6 +253,7 @@ def test_smtp_worker_delivers_once_automatically(desk, monkeypatch):
 def test_spoken_email_readback_requires_separate_appointment_consent(desk):
     with conversation(desk) as say:
         say("Book a first visit next week")
+        say("For me.")
         verify(say, "Frida Tran", "17th July 1995")
         hold = say("the first one works")
         assert "What email address" in hold["text"]
@@ -269,6 +279,7 @@ def test_uncertain_smtp_delivery_is_recoverable_as_staff_work(desk, monkeypatch)
     app.state.frontdesk.mail = settings
     with conversation(desk) as say:
         say("Book next week")
+        say("For me.")
         verify(say)
         proposed = say("option one")
         booked = say("yes", proposed["id"])
@@ -315,6 +326,7 @@ def test_staff_calendar_reviews_conversation_and_changes_appointment(desk):
     app.state.ops.capture_transcripts = True
     with conversation(desk) as say:
         say("Book a follow-up next week with Doctor Chen")
+        say("For me.")
         verify(say)
         offer = say("Can you show me some other times?")
         assert offer["calendar"]
@@ -377,6 +389,7 @@ def test_phone_style_slot_selection_keeps_the_requested_doctor(desk, selection_s
     second = first + timedelta(days=1)
     with conversation(desk) as say:
         say("Hi. Can I book a meeting with schedule a meeting with doctor Chen?")
+        say("For me.")
         say("Nora Sato")
         ambiguous = say("It's fifteenth March twenty twenty fifteenth March two thousand.")
         assert "two different birth dates" in ambiguous["text"]
@@ -387,7 +400,19 @@ def test_phone_style_slot_selection_keeps_the_requested_doctor(desk, selection_s
         options = reply["calendar"]
         assert {instant(slot["start"]).date() for slot in options} == {first, second}
         assert all("Dr. Daniel Chen" in slot["label"] for slot in options)
+        # A time-only reply must refer to exactly one offer. On some calendar
+        # dates both requested days have the same first opening.
         slot = options[0]
+        if selection_style == "spoken time":
+            slots_by_clock = [
+                instant(candidate["start"]).astimezone(BAYVIEW.timezone).time()
+                for candidate in options
+            ]
+            slot = next(
+                candidate
+                for candidate, clock in zip(options, slots_by_clock, strict=True)
+                if slots_by_clock.count(clock) == 1
+            )
         start = instant(slot["start"]).astimezone(BAYVIEW.timezone)
         selection = {
             "spoken time": f"I think {start:%I:%M%p} books will",
@@ -400,3 +425,121 @@ def test_phone_style_slot_selection_keeps_the_requested_doctor(desk, selection_s
         proposal = say("skip email")
         assert proposal["confirmation"]
         assert say("Yes, go ahead", proposal["id"])["outcome"] == "booked"
+
+
+def test_contextual_choice_uses_offers_and_requires_separate_confirmation(desk, monkeypatch):
+    stages = []
+
+    def provider(request):
+        payload = json.loads(request.content)
+        assert payload["tool_choice"]["name"] == "interpret_clinic_turn"
+        context = json.loads(payload["messages"][0]["content"])
+        stages.append(context["stage"])
+        action, value = "unclear", ""
+        if context["stage"] == "select_slot":
+            assert "Dr. Daniel Chen" in context["options"]["2"]
+            assert "Maria Lopez" not in payload["messages"][0]["content"]
+            if context["caller"].startswith("Put me down"):
+                action, value = "select", "2"
+        return httpx.Response(
+            200,
+            json={
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "interpret_clinic_turn",
+                        "input": {
+                            "action": action,
+                            "value": value,
+                            "emergency": False,
+                            "needs_staff": False,
+                        },
+                    }
+                ]
+            },
+        )
+
+    model_client = httpx.AsyncClient(transport=httpx.MockTransport(provider))
+    monkeypatch.setattr(
+        app.state, "browser_router", ClaudeRouter(model_client, "fixture", "fixture")
+    )
+    try:
+        with conversation(desk) as say:
+            say("Book a follow-up next week with Doctor Chen")
+            say("For me.")
+            offers = verify(say)
+            unclear = say("Those might work.")
+            assert all(slot["state"] == "offered" for slot in unclear["calendar"])
+            chosen = say("Put me down for the one you mentioned between the other two.")
+            assert chosen["confirmation"]
+            assert chosen["calendar"][0]["start"] == offers["calendar"][1]["start"]
+            assert not asyncio.run(app.state.scheduling.store.search("Appointment"))
+            assert say("Yes, go ahead.", chosen["id"])["outcome"] == "booked"
+            assert stages == [
+                "intent",
+                "booking_recipient",
+                "name",
+                "dob",
+                "check_dob",
+                "select_slot",
+                "select_slot",
+                "confirm_change",
+            ]
+    finally:
+        desk.portal.call(model_client.aclose)
+
+
+def test_natural_opening_mixed_billing_and_lunch_refinement(desk):
+    with conversation(desk) as say:
+        assert (
+            "for you"
+            in say(
+                "I have a billing question, but my knee has been hurting and I'd like to see a doctor next week"
+            )["text"]
+        )
+        assert "name" in say("For me.")["text"]
+        say("Maria Lopez")
+        identity = say("7/2/84")
+        assert "July 2, 1984" in identity["text"]
+        offered = say("Yep, that's me", identity["id"])
+        later = say("Anything closer to lunch?")
+        assert offered["calendar"][0]["start"] != later["calendar"][0]["start"]
+        held = say("option one")
+        assert say("Yes, go ahead.", held["id"])["outcome"] == "booked"
+    (task,) = desk.get("/api/operations", headers=AUTH).json()["tasks"]
+    assert task["reason"] == "staff_requested"
+    assert task["context"]["topic"] == "billing"
+
+
+def test_proxy_request_requires_permission_before_collecting_patient_identity(desk):
+    with conversation(desk) as say:
+        reply = say("Can I make an appointment for my son next week?")
+        assert reply["outcome"] is None
+        assert "permission" in reply["text"]
+        assert say("No")["outcome"] == "declined"
+    assert not asyncio.run(app.state.scheduling.store.search("Appointment"))
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "I want to change the insurance on file",
+        "I'm running late for my 2pm",
+        "Can I update my coverage with a new card?",
+        "My visit is in twenty minutes and I may be late for it.",
+        "I'm running a few minutes late for my appointment.",
+    ],
+)
+def test_admin_request_does_not_start_a_booking(desk, utterance):
+    with conversation(desk) as say:
+        assert say(utterance)["outcome"] == "handoff"
+
+
+def test_visit_request_with_symptoms_works_without_model(desk):
+    with conversation(desk) as say:
+        reply = say(
+            "I'd like a visit with Dr. Chen next week. My symptoms have been getting worse."
+        )
+        assert reply["outcome"] is None
+        assert "for you" in reply["text"]
+        assert "name" in say("For me.")["text"]

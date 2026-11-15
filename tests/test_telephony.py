@@ -160,7 +160,7 @@ def test_signed_media_websocket_replays_a_booking(client, monkeypatch):
             socket.send_json(mark)
 
         play()
-        for utterance in ["book", "Maria Lopez", "1984-07-02", "yes", "one", "yes"]:
+        for utterance in ["book", "For me.", "Maria Lopez", "1984-07-02", "yes", "one", "yes"]:
             socket.send_json(
                 {
                     "event": "media",

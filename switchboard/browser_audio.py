@@ -97,8 +97,9 @@ async def browser_voice(socket: WebSocket):
         trace = state.ops.start("browser_audio")
         call = Call(
             state.scheduling,
-            state.intent_router,
+            state.turn_interpreter,
             trace,
+            voice=True,
             allow_registration=state.allow_registration,
             frontdesk=state.frontdesk,
             email_form=True,

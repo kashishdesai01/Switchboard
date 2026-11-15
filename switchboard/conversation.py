@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import sqlite3
-from calendar import month_abbr, month_name
+from collections import deque
 from dataclasses import dataclass, replace
 from datetime import date, time, timedelta
 from time import monotonic
@@ -12,9 +13,19 @@ from unicodedata import category, normalize
 from uuid import uuid4
 
 from switchboard.frontdesk import email_address
-from switchboard.intents import Route, Router
+from switchboard.intents import Route, TurnInterpreter, TurnMeaning
+from switchboard.safety import EMERGENCY_SCRIPT, SafetySignal, condition_only, safety_signal
 from switchboard.scheduling import Change, Scheduling, instant
-from switchboard.store import Conflict, Resource, Unavailable
+from switchboard.spoken import (
+    MONTH_PATTERN,
+    birth_dates,
+    date_words,
+    parse_date,
+    parse_time,
+    requested_days,
+    spoken_time,
+)
+from switchboard.store import Conflict, DemoStore, Resource, Unavailable
 
 if TYPE_CHECKING:
     from switchboard.frontdesk import FrontDesk
@@ -22,20 +33,44 @@ if TYPE_CHECKING:
 
 LOG = logging.getLogger(__name__)
 
-EMERGENCY_SCRIPT = "If this is a medical emergency, hang up and call 911 now."
-EMERGENCY = re.compile(
-    r"\b(chest pain|can(?:not|'t) breathe|difficulty breathing|"
-    r"bleeding (?:a lot|heavily)|overdos\w*|suicid\w*|"
-    r"(?:hurt|kill) myself|stroke|unconscious)\b",
+EXPLICIT_STAFF = re.compile(
+    r"\b(?:speak|talk|connect|transfer|put me through)\b.{0,45}"
+    r"\b(?:human|person|someone|staff|nurse|representative|front desk)\b"
+    r"|^(?:(?:i (?:need|want)|i'd like) (?:a |the )?)?"
+    r"(?:human|staff|representative|front desk)(?: please)?[.!]?$",
     re.I,
 )
-STAFF = re.compile(
-    r"\b(?:human|representative|front desk|refill|test results|medical advice|billing|"
-    r"medication|symptoms?|dosage|should i take|is it normal)\b",
+STAFF_TOPIC = re.compile(
+    r"\b(?:refills?|test results|medical advice|billing|dosage|should i take|is it normal"
+    r"|running (?:a little |a bit )?late|(?:be|am|was) (?:a little |a bit )?late|late for"
+    r"|update (?:my |the )?(?:insurance|coverage)"
+    r"|(?:change|replace|remove|add) (?:the |my |an? )?(?:insurance|coverage)(?: on file)?"
+    r"|(?:new|different) insurance (?:card|on file))\b",
     re.I,
 )
-PROXY = re.compile(r"\b(?:for|on behalf of) my (?:child|son|daughter|parent|wife|husband)\b", re.I)
-AFFIRMATIVE = r"(?:yes|yeah|yep|yup|ya|sure|absolutely|of course|okay|ok|right|correct|confirm|sounds good|go (?:right )?ahead|that(?:'s| is) (?:correct|right|fine))"
+RELATION = (
+    r"relative|family member|child|son|daughter|parent|mother|father|mom|dad|"
+    r"grandmother|grandfather|grandma|grandpa|sibling|brother|sister|aunt|uncle|"
+    r"cousin|spouse|wife|husband|partner|friend"
+)
+PROXY = re.compile(
+    rf"\b(?:for|on behalf of) (?:(?:my|our) (?:{RELATION})|"
+    r"(?:him|her|them|someone else|another person))\b(?!'s\b)",
+    re.I,
+)
+SELF_RECIPIENT = re.compile(
+    r"(?:it(?:'s| is) )?(?:for )?(?:me|myself)(?: please| thanks| thank you)?"
+)
+BOOK_REQUEST = re.compile(
+    r"\b(?:book(?:ing)?|schedule|set (?:something|a visit|it) up|"
+    r"(?:need|want|like|make|get|set up|arrange) (?:an? |the |another |to (?:make|get) )?appointment|"
+    r"^(?:an? )?appointment(?: please)?$|"
+    r"(?:need|want|like|arrange|set up) (?:a |another )?(?:(?:routine |first )?visit|follow[ -]?up(?: visit| meeting| appointment)?)|"
+    r"(?:see|visit|meet with|come in to see) (?:a |the |my |an? )?(?:doctor|provider|specialist|"
+    r"orthopedi\w*|dr\.?)|(?:need|want|like|have) to come in|squeeze (?:me|us) in|"
+    r"(?:can|could) i come in|get (?:in to see|an opening|a visit))\b"
+)
+AFFIRMATIVE = r"(?:yes|yeah|yep|yup|ya|sure|absolutely|of course|okay|ok|right|correct|confirm|sounds good|go (?:right )?ahead|that(?:'s| is) (?:correct|right|fine|me))"
 COURTESY = r"(?:please|thanks|thank you)"
 CONFIRM_ACTION = {"book": r"book|schedule", "reschedule": r"reschedule|move", "cancel": r"cancel"}
 NAME_INTRO = re.compile(
@@ -57,13 +92,64 @@ SENTENCE_AS_NAME = re.compile(
 MORE_TIMES = re.compile(
     r"\b(?:(?:other|more|different|additional) (?:times|openings|slots|options)|what else (?:is available|do you have))\b"
 )
-MONTHS = {
-    label.casefold(): index
-    for names in (month_name, month_abbr)
-    for index, label in enumerate(names)
-    if index
+TURN_ACTIONS = {
+    "intent": {
+        "book": "Request a new appointment for anyone. Value may contain explicit scheduling preferences only",
+        "reschedule": "Move an existing appointment. Value may contain explicit scheduling preferences only",
+        "cancel": "Cancel an existing appointment",
+        "insurance": "Ask what insurance the clinic accepts",
+        "coverage": "Check the caller's own coverage",
+    },
+    "booking_recipient": {
+        "self": "Caller explicitly and unambiguously identifies themself as the patient. "
+        "Value must quote their exact latest reply. A name, yes, or an ambiguous reply is unclear",
+        "other": "Caller identifies another person as the patient. Value is empty",
+    },
+    "select_existing": {"more": "Caller asks to hear more existing appointments"},
+    "name": {"name": "Extract only the name explicitly given in the latest reply"},
+    "dob": {
+        "birth_date": "Normalize the stated birth date to YYYY-MM-DD, Month DD, or YYYY alone",
+        "keypad": "Caller asks to enter the date on the phone keypad",
+    },
+    "correct_identity": {
+        "name": "Extract only the replacement name explicitly stated",
+        "birth_date": "Normalize the complete replacement birth date to YYYY-MM-DD",
+        "change_name": "Caller asks to correct their name but does not give the replacement",
+        "change_date": "Caller asks to correct their birth date but does not give the replacement",
+    },
+    "email_address": {
+        "email": "Normalize the email address actually stated, including spoken at and dot",
+        "skip_email": "Caller declines to provide email",
+    },
+    "other_provider": {
+        "preferences": "Value is the explicitly requested provider or scheduling preference",
+    },
+    "day_alternative": {
+        "preferences": "Normalize a requested date or time without adding missing details",
+        "more": "Caller asks to see more openings",
+    },
+    "confirm_change": {
+        "preferences": "Caller requests different scheduling details. Normalize the stated details",
+        "more": "Caller asks to see more openings",
+        "change_email": "Caller asks to use a different email address",
+        "email_question": "Caller asks if or how they will get an email confirmation",
+    },
+    "select_slot": {
+        "preferences": "Caller requests a different time, date, provider or location. Value is the normalized request.",
+        "more": "Caller explicitly asks for additional or different openings",
+        "repeat": "Caller asks to hear the current offers again, including asking what their choices were",
+        "waitlist": "Caller asks to be added to the waitlist",
+    },
 }
-MONTH_PATTERN = "|".join(sorted(MONTHS, key=len, reverse=True))
+CONFIRMATION_STAGES = {
+    "check_name",
+    "check_dob",
+    "email_readback",
+    "confirm_change",
+    "other_provider",
+    "day_alternative",
+    "proxy_booking",
+}
 
 
 def answer_to_confirmation(words: str, action: str | None = None) -> str | None:
@@ -101,25 +187,34 @@ class Call:
     def __init__(
         self,
         scheduling: Scheduling,
-        router: Router | None = None,
+        router: TurnInterpreter | None = None,
         trace: Trace | None = None,
         *,
         allow_registration: bool = False,
         frontdesk: FrontDesk | None = None,
         email_form: bool = False,
+        voice: bool = False,
     ):
         self.trace = trace
+        self.voice = voice
         self.scheduling = scheduling
-        self.router = router
+        self.interpreter = router
         self.allow_registration = allow_registration
+        self.proxy_booking_allowed = bool(frontdesk and isinstance(scheduling.store, DemoStore))
+        self.booking_for_other = False
         self.frontdesk = frontdesk
         self.email_form = email_form
         self.stage = "intent"
+        self.safety_resume: Reply | None = None
+        self.safety_opening: str | None = None
+        self.safety_retries = 0
+        self.pending_booking: tuple[str, str, TurnMeaning | None] | None = None
         self.patient: str | None = None
         self.name = ""
         self.dob: date | None = None
         self.dob_fragment: str | None = None
         self.dob_retries = 0
+        self.identity_playback_retries = 0
         self.new_patient: Resource | None = None
         self.attempts = 0
         self.intent = "book"
@@ -139,14 +234,18 @@ class Call:
         self.pending_email: str | None = None
         self.staff_topic: str | None = None
         self.unclear = 0
+        self.opening_interpreter_failures = 0
         self.digits = ""
         self.provider: str | None = None
         self.options: list[Resource] = []
+        self.existing_options: list[Resource] = []
         self.shown_slots: set[str] = set()
         self.old: Resource | None = None
         self.change: Change | None = None
         self.prompt_id: str | None = None
         self.played = False
+        self.history: deque[dict[str, str]] = deque(maxlen=6)
+        self.last_reply: Reply | None = None
 
     def greeting(self) -> Reply:
         return self.say(
@@ -164,6 +263,8 @@ class Call:
         email_status: str | None = None,
     ) -> Reply:
         reply = Reply(text, uuid4().hex, outcome, confirm, calendar, email_status)
+        self.last_reply = reply
+        self.history.append({"assistant": text[:400]})
         if self.trace:
             self.trace.record("assistant", text)
         self.prompt_id, self.played = (reply.id if confirm else None), False
@@ -181,6 +282,12 @@ class Call:
                         "emergency": "emergency",
                     }[outcome]
                     self._work(reason)
+            if (
+                self.staff_topic
+                and self.staff_topic != "proxy booking"
+                and outcome in {"booked", "declined", "abandoned"}
+            ):
+                self._work("staff_requested")
             self.stage = "closed"
         return reply
 
@@ -224,7 +331,8 @@ class Call:
         location = (
             clinic.locations.get(self.scheduling.location_for(item)) if self.frontdesk else None
         )
-        return f"{start:%A, %B} {start.day} at {start:%I:%M %p} with {name}" + (
+        clock = spoken_time(start.time()) if self.voice else start.strftime("%I:%M %p")
+        return f"{start:%A, %B} {start.day} at {clock} with {name}" + (
             f" at {location}" if location else ""
         )
 
@@ -243,12 +351,17 @@ class Call:
 
     async def handle(self, text: str) -> Reply:
         stage = self.stage
+        previous = self.last_reply
         if self.trace:
             self.trace.record("caller", text)
         started = monotonic()
         try:
             return await self._handle_turn(text)
         finally:
+            # The reply is recorded by say(). Keep the transcript in turn order.
+            if self.last_reply is not previous and self.history and "assistant" in self.history[-1]:
+                last = self.history.pop()
+                self.history.extend([{"caller": text[:400]}, last])
             if self.trace:
                 self.trace.add(
                     "turn_processed",
@@ -256,32 +369,134 @@ class Call:
                     latency_ms=round((monotonic() - started) * 1000),
                 )
 
-    async def _handle_turn(self, text: str) -> Reply:
+    async def _handle_turn(self, text: str, *, safety_clarification: str | None = None) -> Reply:
         text = text.strip()
         words = " ".join(text.lower().replace(",", " ").replace("’", "'").strip(".!? ").split())
-        if EMERGENCY.search(words):
-            reply = self.say(EMERGENCY_SCRIPT, outcome="emergency")
-            if self.trace:
-                self.trace.add("emergency_routed")
-            return reply
+        signal = safety_signal(text)
+        if signal is SafetySignal.ACUTE:
+            return self.emergency_reply()
         if self.stage == "closed":
             return self.say("This call has ended.", outcome="closed")
-        staff = STAFF.search(words)
-        proxy = PROXY.search(words)
-        if words == "0" or staff or proxy:
-            self.staff_topic = (
-                "proxy request" if proxy else staff[0] if staff else "staff requested"
-            )
-            await self.close()
-            return self._handoff(
-                "staff_requested",
-                "Of course. I'll pass this request to the front desk."
-                if self.frontdesk
-                else "This request needs the front desk.",
-            )
         try:
             try:
-                return await self._handle(text, words)
+                meaning = await self._interpret_turn(
+                    text
+                    if safety_clarification is None
+                    else f"{text}\nWhen asked if the condition is happening now, the caller answered: {safety_clarification}"
+                )
+                if meaning and meaning.emergency:
+                    return self.emergency_reply()
+                if self.safety_resume:
+                    answer = answer_to_confirmation(words)
+                    if words == "yes" or (meaning and meaning.action == "current_danger"):
+                        return self.emergency_reply()
+                    if answer == "no" or (meaning and meaning.action == "historical"):
+                        opening, self.safety_opening = self.safety_opening, None
+                        previous, self.safety_resume = self.safety_resume, None
+                        self.safety_retries = 0
+                        if opening is not None and not condition_only(opening):
+                            return await self._handle_turn(opening, safety_clarification=text)
+                        return self.say(
+                            previous.text,
+                            confirm=previous.confirmation,
+                            calendar=previous.calendar,
+                            email_status=previous.email_status,
+                        )
+                    self.safety_retries += 1
+                    if self.safety_retries >= 2:
+                        await self.close()
+                        return self._handoff(
+                            "staff_requested",
+                            "I couldn't tell whether this is happening now. "
+                            "If this is an emergency, call 911 now. The front desk can help with scheduling.",
+                        )
+                if self.safety_resume or (
+                    safety_clarification is None
+                    and signal is SafetySignal.AMBIGUOUS
+                    and (meaning is None or meaning.action == "unclear" or condition_only(text))
+                ):
+                    if not self.safety_resume:
+                        self.safety_resume = self.last_reply or self.greeting()
+                        if self.stage == "intent":
+                            self.safety_opening = text
+                    return self.say(
+                        "Is this happening right now? If it is an emergency, call 911 now."
+                    )
+                staff = STAFF_TOPIC.search(words)
+                proxy = PROXY.search(words)
+                book_request = bool(BOOK_REQUEST.search(words))
+                booking = self.stage == "intent" and (
+                    book_request or (not staff and bool(meaning and meaning.action == "book"))
+                )
+                if booking and self.frontdesk and not EXPLICIT_STAFF.search(words):
+                    if proxy:
+                        if self.proxy_booking_allowed:
+                            self.pending_booking = (words, text, meaning)
+                        else:
+                            self._set_window(words)
+                        return self._ask_proxy_permission()
+                if (
+                    self.stage in {"booking_recipient", "proxy_booking"}
+                    and words != "0"
+                    and not EXPLICIT_STAFF.search(words)
+                ):
+                    return await self._handle(text, words, meaning)
+                grounded_reply = (
+                    (self.stage == "dob" and bool(birth_dates(text, self.scheduling.now().date())))
+                    or (self.stage == "name" and bool(self._name_candidate(text)))
+                    or (
+                        self.stage in CONFIRMATION_STAGES
+                        and answer_to_confirmation(words) is not None
+                    )
+                    or (
+                        self.stage in {"select_slot", "select_existing"}
+                        and self._selection(words) is not None
+                    )
+                )
+                if (
+                    words == "0"
+                    or EXPLICIT_STAFF.search(words)
+                    or proxy
+                    or (
+                        (
+                            staff
+                            or (
+                                meaning
+                                and (meaning.action == "staff" or meaning.needs_staff)
+                                and not grounded_reply
+                            )
+                        )
+                        and not booking
+                    )
+                ):
+                    self.staff_topic = (
+                        "proxy request" if proxy else staff[0] if staff else "staff requested"
+                    )
+                    await self.close()
+                    return self._handoff(
+                        "staff_requested",
+                        "Of course. I'll pass this request to the front desk."
+                        if self.frontdesk
+                        else "This request needs the front desk.",
+                    )
+                if booking and (staff or (meaning and meaning.needs_staff)):
+                    self.staff_topic = staff[0] if staff else "additional caller request"
+                if (
+                    meaning
+                    and meaning.action in {"hours", "locations", "accepted_insurance"}
+                    and not booking
+                    and not grounded_reply
+                ):
+                    response = self._clinic_answer(meaning.action)
+                    if self.stage == "intent":
+                        return self.say(response, outcome="info_only")
+                    if previous := self.last_reply:
+                        return self.say(
+                            f"{response} {previous.text}",
+                            confirm=previous.confirmation,
+                            calendar=previous.calendar,
+                        )
+                return await self._handle(text, words, meaning)
             except Conflict:
                 await self.close()
                 if self.intent == "book":
@@ -296,13 +511,173 @@ class Call:
                 outcome="needs_review",
             )
 
-    async def _handle(self, text: str, words: str) -> Reply:
-        answer = answer_to_confirmation(words)
+    def emergency_reply(self, text: str | None = None) -> Reply:
+        if text and self.trace:
+            self.trace.record("caller", text)
+        reply = self.say(EMERGENCY_SCRIPT, outcome="emergency")
+        if self.trace:
+            self.trace.add("emergency_routed")
+        return reply
+
+    async def _interpret_turn(self, text: str) -> TurnMeaning | None:
+        if not self.interpreter:
+            return None
+        actions = {
+            **TURN_ACTIONS.get(self.stage, {}),
+            "staff": "The caller requests staff or asks a clinical question",
+            "hours": "The caller asks when the clinic is open",
+            "locations": "The caller asks where the clinic is located",
+            "accepted_insurance": "The caller asks which insurers the clinic accepts",
+        }
+        if self.safety_resume:
+            actions["current_danger"] = (
+                "Caller explicitly confirms the possible emergency is happening now."
+            )
+            actions["historical"] = (
+                "Caller explicitly says the condition is historical, resolved, or hypothetical."
+            )
+        if self.stage in CONFIRMATION_STAGES:
+            actions.update(
+                affirm="Clearly and unconditionally agrees to the exact last question. "
+                "For booking changes, bare acknowledgments like okay or right are insufficient.",
+                decline="Clearly says no to the last question",
+            )
+        if self.stage in {"check_name", "check_dob", "email_readback"}:
+            actions.update(
+                TURN_ACTIONS["correct_identity"]
+                if self.stage != "email_readback"
+                else TURN_ACTIONS["email_address"]
+            )
+        context = {
+            "stage": self.stage,
+            "request": self.intent,
+            "recent": list(self.history)[-3:],
+            "caller": text,
+        }
+        clinic = self.scheduling.clinic
+        context["clinic"] = {
+            "providers": list(clinic.providers.values()),
+            "locations": list(clinic.locations.values()),
+            "services": clinic.referral_services,
+            "today": str(self.scheduling.now().astimezone(clinic.timezone).date()),
+        }
+        if self.stage in {"select_slot", "select_existing"}:
+            # The options carry the current offer. Avoid repeating it in the history.
+            context.pop("recent", None)
+            if self.last_reply:
+                context["prompt"] = self.last_reply.text.split("Option 1:", 1)[0].strip()[:200]
+            context["options"] = dict(enumerate(self._offer_descriptions(), 1))
+            if self.options:
+                actions["select"] = (
+                    "Caller clearly chooses one of the listed offers. Value is its option number. "
+                    "Use chronological labels for time references and the numbers for offer order. "
+                    "Refusals, questions, and multiple possible choices are not selections."
+                )
+        try:
+            async with asyncio.timeout(8):
+                result = await self.interpreter.interpret_turn(context, actions)
+        except TimeoutError:
+            result = None
+        if self.trace:
+            self.trace.add(
+                "context_interpreted" if result else "context_unresolved", state=self.stage
+            )
+        return result
+
+    def _context_answer(
+        self, words: str, meaning: TurnMeaning | None, *, change: bool = False
+    ) -> str | None:
+        exact = answer_to_confirmation(words, self.intent if change else None)
+        if change or not meaning or exact:
+            return exact
+        if meaning.action == "decline":
+            return "no"
+        # Reject qualifications and contradictory evidence before interpreting consent.
+        if meaning.action == "affirm" and not re.search(
+            r"\b(?:no|not|don't|cannot|can't|but|unless|instead|maybe|if|wait|later)\b|\d",
+            words,
+        ):
+            return "yes"
+        return None
+
+    def _ask_proxy_permission(self) -> Reply:
+        self.stage = "proxy_booking"
+        if self.proxy_booking_allowed:
+            return self.say("Do you have permission to book a new visit for this patient?")
+        self.staff_topic = "proxy booking"
+        return self.say(
+            "The front desk can help book visits for someone else. "
+            "Would you like me to send them your scheduling request?"
+        )
+
+    async def _handle(self, text: str, words: str, meaning: TurnMeaning | None = None) -> Reply:
+        answer = self._context_answer(words, meaning)
+        action = meaning.action if meaning else ""
+        value = meaning.value.strip() if meaning else ""
         match self.stage:
             case "intent":
-                return await self._start(words, text)
+                return await self._start(words, text, meaning)
+            case "booking_recipient":
+                if (
+                    action == "other"
+                    or PROXY.search(words)
+                    or re.fullmatch(rf"(?:for )?(?:him|her|them|(?:my|our) (?:{RELATION}))", words)
+                ):
+                    if not self.proxy_booking_allowed:
+                        self.pending_booking = None
+                    return self._ask_proxy_permission()
+                if SELF_RECIPIENT.fullmatch(words) or (
+                    action == "self"
+                    and value == text.strip()
+                    and re.search(r"\b(?:i|me|myself|mine)\b", words)
+                    and not re.search(r"\b(?:not|no|maybe|both|also|and|or|instead)\b", words)
+                ):
+                    assert self.pending_booking is not None
+                    opening_words, opening_text, opening_meaning = self.pending_booking
+                    self.pending_booking = None
+                    return await self._start(
+                        opening_words, opening_text, opening_meaning, recipient_confirmed=True
+                    )
+                self.unclear += 1
+                if self.unclear >= 3:
+                    self.pending_booking = None
+                    return self._handoff(
+                        "staff_requested",
+                        "I couldn't confirm who the appointment is for. The front desk can help.",
+                    )
+                return self.say("Is the appointment for you or for someone else?")
+            case "proxy_booking":
+                if self.proxy_booking_allowed:
+                    if answer_to_confirmation(words) == "no":
+                        self.pending_booking = None
+                        return self.say("Okay. I haven't booked anything.", outcome="declined")
+                    if answer_to_confirmation(words, "book") == "yes":
+                        assert self.pending_booking is not None
+                        opening_words, opening_text, opening_meaning = self.pending_booking
+                        self.pending_booking = None
+                        self.booking_for_other = True
+                        self.name, self.dob = "", None
+                        return await self._start(
+                            opening_words, opening_text, opening_meaning, recipient_confirmed=True
+                        )
+                    return self.say(
+                        "Do you have permission to book for the patient? Please say yes or no."
+                    )
+                if answer == "yes":
+                    return self._handoff(
+                        "staff_requested", "I'll pass your booking request to the front desk."
+                    )
+                if answer == "no":
+                    return self.say("Okay. I haven't sent a request.", outcome="declined")
+                if await self._update_preferences(words):
+                    return self.say(
+                        "I have your scheduling preferences. Should I send this request to the front desk?"
+                    )
+                return self.say("Should I send the front desk your booking request?")
             case "other_provider":
-                self.provider = self._provider(words)
+                self.provider = self._provider(words) or (
+                    self._provider(value.casefold()) if action == "preferences" else None
+                )
                 if self.provider or answer == "yes" or words in {"anyone", "another doctor"}:
                     self._set_window(words)
                     return self._ask_name()
@@ -310,16 +685,29 @@ class Call:
                     return self.say("Of course. Thanks for calling.", outcome="declined")
                 return self.say("Would you like to hear times with another doctor here?")
             case "name":
+                if (
+                    action == "name"
+                    and value
+                    and value.casefold() in text.casefold()
+                    and not self._identity_details(text)
+                ):
+                    return self._capture_name(value)
                 return self._capture_name(text)
             case "check_name":
                 if answer == "yes" and self.played:
                     self.stage = "dob"
-                    return self.say("Thanks. What's your date of birth?")
+                    return self.say(
+                        "What's the patient's date of birth?"
+                        if self.booking_for_other
+                        else "Thanks. What's your date of birth?"
+                    )
                 if answer == "no" or words in {"change it", "change my name", "the name"}:
                     self.name = ""
                     return self._ask_name()
                 if INTRODUCED_NAME.search(text):
                     return self._capture_name(text, confirm=True)
+                if action in TURN_ACTIONS["correct_identity"]:
+                    return self._apply_identity_correction(text, words, action, value)
                 return self._ask_name()
             case "day_alternative":
                 if answer == "yes" or MORE_TIMES.search(words):
@@ -328,32 +716,39 @@ class Call:
                     return await self._offer()
                 if answer == "no":
                     return self.say("Of course. I haven't booked anything.", outcome="declined")
-                if await self._update_preferences(words):
+                if await self._update_preferences(words) or (
+                    action == "preferences" and await self._update_preferences(value.casefold())
+                ):
                     return await self._offer()
                 return self.say(
                     "Would you like the next available day, or is there another day you prefer?"
                 )
             case "dob":
-                if words in {"keypad", "use the keypad"}:
+                if words in {"keypad", "use the keypad"} or (
+                    action == "keypad" and re.search(r"\b(?:keypad|keys|type)\b", words)
+                ):
                     self.stage = "keypad"
                     self.digits = ""
                     return self.say("Enter eight digits in year, month, day order.")
-                dates = date_candidates(text)
+                dates = birth_dates(text, self.scheduling.now().date())
                 if len(dates) > 1:
                     self.dob_fragment = None
                     return self.say(
                         "I heard two different birth dates. Could you say your birth date once?"
                     )
+                if not dates and action == "birth_date" and value:
+                    text = value
+                    dates = birth_dates(text, self.scheduling.now().date())
                 self.dob = next(iter(dates), None)
                 if self.dob is None and self.dob_fragment:
-                    year = re.fullmatch(r"(?:i was born in |in )?(\d{4})", _date_words(text))
-                    if year:
-                        self.dob = parse_date(f"{self.dob_fragment} {year[1]}")
+                    years = set(re.findall(r"\b\d{4}\b", date_words(text)))
+                    if len(years) == 1:
+                        self.dob = parse_date(f"{self.dob_fragment} {years.pop()}")
                 if self.dob is None:
                     fragment = re.search(
                         rf"\b(?:\d{{1,2}}\s+(?:(?:of|to)\s+)?(?:{MONTH_PATTERN})|"
                         rf"(?:{MONTH_PATTERN})\s+\d{{1,2}})\b",
-                        _date_words(text),
+                        date_words(text),
                     )
                     if fragment and not re.search(r"\b\d{4}\b", text):
                         self.dob_fragment = fragment[0].replace(" to ", " of ")
@@ -361,9 +756,15 @@ class Call:
                 if self.dob is None or self.dob > self.scheduling.now().date():
                     self.dob = None
                     self.dob_retries += 1
+                    if self.voice and self.dob_retries >= 3:
+                        return self._handoff(
+                            "identity_unverified",
+                            "I couldn't confirm the birth date. The front desk can help.",
+                        )
                     if self.dob_retries >= 2:
                         return self.say(
-                            "I'm having trouble hearing the date. Say it again, or say use the keypad."
+                            "Say the month first, then the day and four-digit year. "
+                            "You can also say use the keypad or ask for the front desk."
                         )
                     if self.dob_fragment:
                         return self.say("I have the month and day. What year were you born?")
@@ -379,14 +780,33 @@ class Call:
                     self.stage = "correct_identity"
                     return self.say("Of course. Which should I change, the name or date of birth?")
                 if answer != "yes":
+                    if action in TURN_ACTIONS["correct_identity"]:
+                        return self._apply_identity_correction(text, words, action, value)
                     return self._correct_identity(text, words)
                 return await self._verify()
             case "correct_identity":
-                return self._correct_identity(text, words)
+                return self._apply_identity_correction(text, words, action, value)
             case "select_existing":
-                return await self._select_existing(words)
+                return await self._select_existing(text, words, meaning)
             case "select_slot":
-                option = self._selection(words) or self._offered_time(text, words)
+                if MORE_TIMES.search(words):
+                    return await self._offer(more=True)
+                if re.search(
+                    r"\b(?:closer to|near|around)\b", words
+                ) and await self._update_preferences(words):
+                    return await self._offer()
+                if re.fullmatch(r"(?:option )?[1-3]", words):
+                    option = self._selection(words)
+                else:
+                    option = self._choose_option(text, words, meaning=meaning)
+                if self.frontdesk and action == "waitlist":
+                    return await self._join_waitlist()
+                if action == "more":
+                    return await self._offer(more=True)
+                if action == "repeat":
+                    return self._list_options("Here are the options again.")
+                if action == "preferences" and await self._update_preferences(value.casefold()):
+                    return await self._offer()
                 if option is None:
                     if self.frontdesk and re.search(
                         r"\b(?:join|add me to|put me on) (?:the )?wait ?list\b", words
@@ -396,8 +816,6 @@ class Call:
                         return self._list_options(answer)
                     if await self._update_preferences(words):
                         return await self._offer()
-                    if MORE_TIMES.search(words):
-                        return await self._offer(more=True)
                     if self.frontdesk and (answer == "yes" or words in {"i see", "got it"}):
                         return self.say(
                             "Take your time. Which of those options would you prefer?",
@@ -421,8 +839,12 @@ class Call:
                 )
                 return await self._prepare_confirmation()
             case "confirm_change":
-                return await self._confirm(words)
+                return await self._confirm(words, meaning)
             case "email_address":
+                if action == "skip_email":
+                    return self._capture_email(text, "skip email")
+                if action == "email" and email_address(value):
+                    return self._capture_email(value, words)
                 return self._capture_email(text, words)
             case "email_readback":
                 if answer == "yes" and self.played:
@@ -437,7 +859,11 @@ class Call:
                     return self.say(
                         "Of course. What email address should I use? You can also say skip email."
                     )
-                return self._capture_email(text, words)
+                if action == "skip_email":
+                    return self._capture_email(text, "skip email")
+                return self._capture_email(
+                    value if action == "email" and email_address(value) else text, words
+                )
             case _:
                 raise RuntimeError(f"Invalid conversation stage: {self.stage}")
 
@@ -462,44 +888,63 @@ class Call:
         self.stage = "check_dob"
         return self._read_identity()
 
-    async def _route(self, words: str) -> Route:
-        if re.search(r"\b(reschedule|move|change)\b", words):
+    def _route(self, words: str) -> Route:
+        if re.search(
+            r"\b(?:reschedule|move|change)\b.{0,30}\b(?:insurance|coverage|address|email|phone number)\b",
+            words,
+        ):
+            return "staff"
+        if re.search(
+            r"\breschedul\w*\b|\b(?:move|change)\b.{0,45}\b(?:appointment|visit|booking|time|slot)\b",
+            words,
+        ):
             return "reschedule"
         if re.search(r"\bcancel\b", words):
             return "cancel"
-        if re.search(r"\b(book|schedule)\b", words):
+        if BOOK_REQUEST.search(words) and not re.search(
+            r"\b(?:accept|take|which|what|do you)\b.{0,24}\b(?:insurance|coverage)\b", words
+        ):
             return "book"
         if re.search(r"\b(insurance|coverage|accept)\b", words):
             return "insurance"
-        if re.search(r"\bappointment\b", words):
-            return "book"
-        return (
-            await self.router.classify(words)
-            if self.router and not self._identity_details(words)
-            else "unknown"
-        )
+        return "unknown"
 
-    async def _start(self, words: str, text: str) -> Reply:
-        if self.frontdesk and (opening_name := INTRODUCED_NAME.search(text)):
-            candidate = self._name_candidate(opening_name[1])
-            if candidate:
-                self.name = candidate
-        if (
-            self.frontdesk
-            and re.search(r"\b(locations?|where are you|addresses)\b", words)
-            and not re.search(r"\b(book|schedule|appointment)\b", words)
-        ):
-            return self.say(self._locations(), outcome="info_only")
-        if re.search(r"\b(hours|when are you open)\b", words):
-            return self.say(
-                f"The clinic is open {self.scheduling.clinic.weekday_hours}.", outcome="info_only"
-            )
-        if re.search(r"\bmy (insurance|coverage|plan)\b", words) and not re.search(
-            r"\b(accept|take)\b", words
-        ):
-            self.intent = "coverage"
-            return self._ask_name()
-        intent = await self._route(words)
+    async def _start(
+        self,
+        words: str,
+        text: str,
+        meaning: TurnMeaning | None = None,
+        *,
+        recipient_confirmed: bool = False,
+    ) -> Reply:
+        if not recipient_confirmed:
+            if (
+                self.frontdesk
+                and re.search(r"\b(locations?|where are you|addresses)\b", words)
+                and not re.search(r"\b(book|schedule|appointment)\b", words)
+            ):
+                return self.say(self._locations(), outcome="info_only")
+            if re.search(r"\b(hours|when are you open)\b", words):
+                return self.say(
+                    f"The clinic is open {self.scheduling.clinic.weekday_hours}.",
+                    outcome="info_only",
+                )
+            if (meaning and meaning.action == "coverage") or (
+                not BOOK_REQUEST.search(words)
+                and re.search(r"\bmy (insurance|coverage|plan)\b", words)
+                and not re.search(r"\b(accept|take)\b", words)
+            ):
+                self.intent = "coverage"
+                return self._ask_name()
+        intent = (
+            "book"
+            if recipient_confirmed
+            else meaning.action
+            if meaning and meaning.action in {"book", "reschedule", "cancel", "insurance"}
+            else "book"
+            if self.staff_topic and BOOK_REQUEST.search(words)
+            else self._route(words)
+        )
         if (
             self.frontdesk
             and intent == "unknown"
@@ -523,6 +968,25 @@ class Call:
         if intent == "staff":
             return self.say("This request needs the front desk.", outcome="handoff")
         if intent == "unknown":
+            if self.interpreter and meaning is None:
+                self.opening_interpreter_failures += 1
+                if self.opening_interpreter_failures >= 2:
+                    return self._handoff(
+                        "staff_requested",
+                        "I'm still having trouble understanding the request. The front desk can help.",
+                    )
+                return self.say(
+                    "I had trouble understanding the request. Could you repeat it? "
+                    "You can also ask for the front desk."
+                )
+            self.opening_interpreter_failures = 0
+            if (
+                self.frontdesk
+                and not self.booking_for_other
+                and (opening_name := INTRODUCED_NAME.search(text))
+            ):
+                if candidate := self._name_candidate(opening_name[1]):
+                    self.name = candidate
             self.unclear += 1
             if self.frontdesk and self.unclear >= 3:
                 return self._handoff(
@@ -531,6 +995,18 @@ class Call:
             return self.say(
                 "I'm listening. Are you looking to book or change an appointment, or ask about insurance?"
             )
+        if intent == "book" and not recipient_confirmed:
+            self.pending_booking = (words, text, meaning)
+            self.unclear = 0
+            self.stage = "booking_recipient"
+            return self.say("Is the appointment for you or for someone else?")
+        if (
+            self.frontdesk
+            and not self.booking_for_other
+            and (opening_name := INTRODUCED_NAME.search(text))
+        ):
+            if candidate := self._name_candidate(opening_name[1]):
+                self.name = candidate
         self.intent = intent
         self.unclear = 0
         self.visit = (
@@ -550,6 +1026,8 @@ class Call:
         else:
             identity = None
             preference_words = words
+        if meaning and meaning.action in {"book", "reschedule"} and meaning.value:
+            await self._update_preferences(meaning.value.casefold())
         await self._update_preferences(preference_words)
         requested = next(
             (
@@ -565,7 +1043,7 @@ class Call:
                 f"Dr. {requested.title()} isn't on the schedule for "
                 f"{self.scheduling.clinic.name}. Would you like to hear times with another doctor here?"
             )
-        if identity:
+        if identity and not self.booking_for_other:
             self.stage = "name"
             return self._capture_name(text[identity_start:])
         return self._ask_name()
@@ -590,6 +1068,16 @@ class Call:
             f"We can schedule visits at {locations}."
             if locations
             else "The front desk can help with location details."
+        )
+
+    def _clinic_answer(self, action: str) -> str:
+        clinic = self.scheduling.clinic
+        if action == "hours":
+            return f"The clinic is open {clinic.weekday_hours}."
+        if action == "locations":
+            return self._locations()
+        return (
+            f"The clinic lists {', '.join(clinic.accepted_payers)}. Staff can confirm other plans."
         )
 
     def _scheduling_question(self, words: str) -> str | None:
@@ -643,18 +1131,6 @@ class Call:
             changed = True
         if changed or location or provider:
             return True
-        if (
-            self.router
-            and not self._identity_details(words)
-            and self.stage in {"intent", "select_slot", "confirm_change"}
-            and re.search(
-                r"\b(?:after|before|around|later|earlier|next|weekday|weekend|o'clock|noon)\b",
-                words,
-            )
-        ):
-            extract = getattr(self.router, "preferences", None)
-            if extract and (normalized := await extract(words)):
-                return self._set_window(normalized)
         return False
 
     def _preferences(self) -> dict:
@@ -675,6 +1151,11 @@ class Call:
         }
 
     async def _join_waitlist(self) -> Reply:
+        if self.booking_for_other:
+            return self.say(
+                "The front desk can help with the patient's waitlist. "
+                "Would you like to choose an appointment time?"
+            )
         if not self.patient or self.new_patient:
             return self._handoff(
                 "no_availability",
@@ -718,7 +1199,11 @@ class Call:
                 confirm=True,
             )
         self.stage = "name"
-        return self.say("What name should I use?")
+        return self.say(
+            "What's the patient's full name?"
+            if self.booking_for_other
+            else "What name should I use?"
+        )
 
     @staticmethod
     def _name_candidate(text: str) -> str | None:
@@ -746,7 +1231,8 @@ class Call:
 
     def _capture_name(self, text: str, *, confirm: bool = False) -> Reply:
         if self.frontdesk and (identity := self._identity_details(text)):
-            supplied_dob = parse_date(text[identity.end() :])
+            supplied_dates = birth_dates(text[identity.end() :], self.scheduling.now().date())
+            supplied_dob = supplied_dates[0] if len(supplied_dates) == 1 else None
             if supplied_dob and supplied_dob <= self.scheduling.now().date():
                 self.dob = supplied_dob
             text = text[: identity.start()].rstrip(" ,.;")
@@ -765,13 +1251,21 @@ class Call:
         if confirm:
             return self._ask_name()
         self.stage = "dob"
-        return self.say("Thanks. What's your date of birth?")
+        return self.say(
+            "What's the patient's date of birth?"
+            if self.booking_for_other
+            else "Thanks. What's your date of birth?"
+        )
 
     def _set_window(self, words: str) -> bool:
         today = self.scheduling.now().astimezone(self.scheduling.clinic.timezone).date()
         days = requested_days(words, today)
         day = days[0] if len(days) == 1 else None
         requested_time = parse_time(words)
+        if requested_time is None and re.search(
+            r"\b(?:near|closer to|around|about|at|by)\s+(?:lunchtime|lunch)\b|^lunchtime$", words
+        ):
+            requested_time = time(12)
         after = before = None
         if self.frontdesk:
             lower = re.search(r"\b(?:after|from)\s+(.+?)(?=\s+(?:and|before|until)\b|$)", words)
@@ -808,8 +1302,10 @@ class Call:
                 7 - today.weekday() + index if weekday[1] else (index - today.weekday()) % 7 or 7
             )
             day = today + timedelta(days=delta)
-        elif not days and "next week" in words:
+        elif not days and re.search(r"\b(?:next|(?:the )?coming|following) week\b", words):
             week = today + timedelta(days=7 - today.weekday())
+        elif not days and re.search(r"\b(?:next|coming) (?:seven|7) days\b", words):
+            week = today
         if (
             not days
             and day is None
@@ -840,16 +1336,17 @@ class Call:
             raise RuntimeError("Patient has not been verified")
         return self.patient
 
-    def _read_identity(self) -> Reply:
+    def _read_identity(self, prefix: str = "") -> Reply:
         assert self.dob is not None
         return self.say(
-            f"I heard {self.name}, born {self.dob:%B} {self.dob.day}, {self.dob.year}. "
+            f"{prefix}I heard {self.name}, born {self.dob:%B} {self.dob.day}, {self.dob.year}. "
             "Is that correct?",
             confirm=True,
         )
 
     def _correct_identity(self, text: str, words: str) -> Reply:
-        corrected_date = parse_date(text)
+        dates = birth_dates(text, self.scheduling.now().date())
+        corrected_date = dates[0] if len(dates) == 1 else None
         if corrected_date and corrected_date <= self.scheduling.now().date():
             self.dob = corrected_date
             self.stage = "check_dob"
@@ -869,9 +1366,35 @@ class Call:
             return self._capture_name(text)
         return self._read_identity()
 
+    def _apply_identity_correction(self, text: str, words: str, action: str, value: str) -> Reply:
+        if action == "name" and value and value.casefold() in text.casefold():
+            return self._capture_name(value, confirm=True)
+        if (
+            action == "birth_date"
+            and (corrected := parse_date(value))
+            and corrected <= self.scheduling.now().date()
+        ):
+            return self._correct_identity(value, words)
+        if action == "change_name":
+            return self._correct_identity(text, "change my name")
+        if action == "change_date":
+            return self._correct_identity(text, "date of birth")
+        return self._correct_identity(text, words) if self.dob else self._ask_name()
+
     async def _verify(self) -> Reply:
+        if not self.played and self.voice and self.dob is not None:
+            self.identity_playback_retries += 1
+            if self.identity_playback_retries >= 3:
+                return self._handoff(
+                    "identity_unverified",
+                    "I have the date, but I couldn't confirm the read-back. The front desk can help.",
+                )
+            return self._read_identity(
+                "I have the date. Please wait for the read-back to finish before saying yes. "
+            )
         if not self.played or self.dob is None:
             return self._read_identity()
+        self.identity_playback_retries = 0
         self.patient = await self.scheduling.identify(self.name, self.dob)
         if self.patient is None and self.intent == "book" and self.allow_registration:
             self.new_patient = await self.scheduling.draft_demo_patient(self.name, self.dob)
@@ -904,7 +1427,11 @@ class Call:
             return self.say(
                 "I couldn't find an active coverage record. Staff can verify it.", outcome="handoff"
             )
-        self.options = await self.scheduling.appointments(self._patient())
+        self.options = await self.scheduling.appointments(
+            self._patient(), limit=None if self.voice else 2
+        )
+        if self.voice:
+            self.options, self.existing_options = self.options[:2], self.options[2:]
         if not self.options:
             return self.say("I found no upcoming appointments to change.", outcome="info_only")
         self.stage = "select_existing"
@@ -912,11 +1439,38 @@ class Call:
 
     def _list_options(self, lead: str) -> Reply:
         options = " ".join(
-            f"Option {index}: {self.describe(item)}." for index, item in enumerate(self.options, 1)
+            f"Option {index}: {label}." for index, label in enumerate(self._offer_labels(), 1)
         )
         return self.say(
             f"{lead} {options}".strip(), calendar=self._calendar(self.options, "offered")
         )
+
+    def _offer_labels(self) -> list[str]:
+        if not self.voice:
+            return [self.describe(item) for item in self.options]
+        labels = []
+        clinic = self.scheduling.clinic
+        locations = {self.scheduling.location_for(item) for item in self.options}
+        providers = {self.scheduling.provider_for(item) for item in self.options}
+        local_starts = [instant(item["start"]).astimezone(clinic.timezone) for item in self.options]
+        # Different clinicians or locations can be the only distinction at a
+        # shared time. Include enough information to choose in that case.
+        same_time = len(set(local_starts)) < len(local_starts)
+        for item, start in zip(self.options, local_starts, strict=True):
+            label = f"{start:%A, %B} {start.day} at {spoken_time(start.time())}"
+            if (
+                self.stage == "select_existing"
+                or same_time
+                or (self.provider and len(providers) > 1)
+            ):
+                label += f" with {clinic.providers.get(self.scheduling.provider_for(item), 'the clinic')}"
+            if (self.location or same_time or self.stage == "select_existing") and len(
+                locations
+            ) > 1:
+                if location := clinic.locations.get(self.scheduling.location_for(item)):
+                    label += f" at {location}"
+            labels.append(label)
+        return labels
 
     async def _offer(self, prefix: str = "", *, more: bool = False) -> Reply:
         self.unclear = 0
@@ -971,6 +1525,7 @@ class Call:
             before=self.before,
             exclude=self.shown_slots,
             days=self.days,
+            limit=2 if self.voice else 3,
         )
         self.shown_slots.update(slot["id"] for slot in self.options)
         self.stage = "select_slot"
@@ -1000,7 +1555,11 @@ class Call:
             first_start = instant(self.options[0]["start"]).astimezone(
                 self.scheduling.clinic.timezone
             )
-            requested = self.requested_time.strftime("%I:%M %p").lstrip("0")
+            requested = (
+                spoken_time(self.requested_time)
+                if self.voice
+                else self.requested_time.strftime("%I:%M %p").lstrip("0")
+            )
             if first_start.time() != self.requested_time:
                 lead = (
                     "Here are more nearby openings."
@@ -1085,8 +1644,68 @@ class Call:
             return matches[0]
         return None
 
-    async def _select_existing(self, words: str) -> Reply:
-        self.old = self._selection(words)
+    def _offer_descriptions(self) -> list[str]:
+        zone = self.scheduling.clinic.timezone
+        starts = [instant(option["start"]).astimezone(zone) for option in self.options]
+        chronological = sorted(set(starts))
+        labels = (
+            ["only"]
+            if len(chronological) == 1
+            else ["earliest", *(["intermediate"] * max(0, len(chronological) - 2)), "latest"]
+        )
+        return [
+            f"{self.describe(option)} ({'morning' if start.hour < 12 else 'afternoon'}, "
+            f"{labels[chronological.index(start)]} by time)"
+            for option, start in zip(self.options, starts, strict=True)
+        ]
+
+    def _relative_option(self, words: str) -> tuple[bool, Resource | None]:
+        reference = re.fullmatch(
+            r"(?:(?:i'll take|i want|i'd like|let's do|go with) )?(?:the )?"
+            r"(earlier|earliest|later|latest)(?: one| appointment| time)?"
+            r"(?: of (?:the|those|these) (?:two|three))?(?: please| works(?: for me)?)?",
+            words,
+        )
+        if not reference or not self.options:
+            return False, None
+        rank = min if reference[1] in {"earlier", "earliest"} else max
+        chosen = rank(instant(option["start"]) for option in self.options)
+        matches = [option for option in self.options if instant(option["start"]) == chosen]
+        return True, matches[0] if len(matches) == 1 else None
+
+    def _choose_option(
+        self, text: str, words: str, *, existing: bool = False, meaning: TurnMeaning | None = None
+    ) -> Resource | None:
+        if direct := self._selection(words):
+            return direct
+        relative, option = self._relative_option(words)
+        if relative:
+            return option
+        if not existing and (by_time := self._offered_time(text, words)):
+            return by_time
+        if meaning and meaning.action == "select":
+            if text.rstrip().endswith("?") or re.search(
+                r"\b(?:maybe|either|neither|both|instead|closer to|doesn't work|won't work|can't do)\b",
+                words,
+            ):
+                return None
+            index = int(meaning.value) - 1 if re.fullmatch(r"[1-9][0-9]?", meaning.value) else -1
+            if 0 <= index < len(self.options):
+                return self.options[index]
+        return None
+
+    async def _select_existing(
+        self, text: str, words: str, meaning: TurnMeaning | None = None
+    ) -> Reply:
+        if self.voice and (MORE_TIMES.search(words) or (meaning and meaning.action == "more")):
+            if self.existing_options:
+                self.options, self.existing_options = (
+                    self.existing_options[:2],
+                    self.existing_options[2:],
+                )
+                return self._list_options("Here are more appointments.")
+            return self._list_options("These are the last appointments I found.")
+        self.old = self._choose_option(text, words, existing=True, meaning=meaning)
         if self.old is None:
             return self.say("Please say the option number.")
         if not self.scheduling.can_change(self.old):
@@ -1115,9 +1734,14 @@ class Call:
                 assert change.old is not None
                 text = f"Move your appointment from {self.describe(change.old)} to {time}?"
             else:
-                text = f"Book your {self.visit} on {time}?"
+                visit = (
+                    f"the patient's {self.visit}"
+                    if self.booking_for_other
+                    else f"your {self.visit}"
+                )
+                text = f"Book {visit} on {time}?"
                 if change.new_patient is not None:
-                    text = f"Create a new demo patient record and book your first visit on {time}?"
+                    text = f"Create a new demo patient record and book {visit} on {time}?"
         return self.say(
             prefix + text + " Please say yes or no.",
             confirm=True,
@@ -1125,7 +1749,7 @@ class Call:
         )
 
     async def _prepare_confirmation(self) -> Reply:
-        if self.frontdesk and not self.email_checked:
+        if self.frontdesk and not self.email_checked and not self.booking_for_other:
             stored = (
                 await self.scheduling.email_on_file(self._patient())
                 if not self.new_patient
@@ -1178,26 +1802,57 @@ class Call:
             calendar=self._held_calendar(),
         )
 
-    async def _confirm(self, words: str) -> Reply:
+    async def _confirm(self, words: str, meaning: TurnMeaning | None = None) -> Reply:
+        action = meaning.action if meaning else ""
+        if action == "email_question" and self.intent != "cancel" and not self.booking_for_other:
+            message = (
+                "I'll use the email address we confirmed if you go ahead."
+                if self.email_on_file
+                else "The front desk will need an email address to send a confirmation."
+            )
+            return self._read_change(message + " ")
         if (
             self.frontdesk
+            and not self.booking_for_other
             and self.intent != "cancel"
-            and re.fullmatch(
-                r"(?:please )?(?:change|update|use a different) (?:my |the )?email(?: address)?",
-                words,
+            and (
+                action == "change_email"
+                or re.fullmatch(
+                    r"(?:please )?(?:change|update|use a different) (?:my |the )?email(?: address)?",
+                    words,
+                )
             )
         ):
             self.stage = "email_address"
             return self.say("What email address should I use for this appointment confirmation?")
-        answer = answer_to_confirmation(words, self.intent)
-        if answer == "no":
+        answer = self._context_answer(words, meaning, change=True)
+        if (
+            answer == "no"
+            or re.match(
+                r"(?:please )?(?:i (?:don't|do not) want you to |don't |do not )"
+                r"(?:book|schedule|move|reschedule|cancel)\b",
+                words,
+            )
+            and not parse_time(words)
+            and not requested_days(
+                words, self.scheduling.now().astimezone(self.scheduling.clinic.timezone).date()
+            )
+        ):
             await self.close()
             return self.say("Okay, I made no changes.", outcome="declined")
         confirmed = answer == "yes"
         if self.intent != "cancel" and not confirmed and await self._update_preferences(words):
             await self.close()
             return await self._offer()
-        if self.intent != "cancel" and MORE_TIMES.search(words):
+        if (
+            self.intent != "cancel"
+            and meaning
+            and action == "preferences"
+            and await self._update_preferences(meaning.value.casefold())
+        ):
+            await self.close()
+            return await self._offer()
+        if self.intent != "cancel" and (action == "more" or MORE_TIMES.search(words)):
             await self.close()
             return await self._offer(more=True)
         if not confirmed or not self.played:
@@ -1219,7 +1874,7 @@ class Call:
                 "telecom": [{"system": "email", "value": self.email_on_file}],
             }
             change = replace(change, new_patient=patient)
-        if self.frontdesk:
+        if self.frontdesk and not self.booking_for_other:
             try:
                 details = ""
                 if change.hold:
@@ -1261,7 +1916,7 @@ class Call:
         if change.hold:
             delivery = None
             email_note = ""
-            if self.frontdesk:
+            if self.frontdesk and not self.booking_for_other:
                 try:
                     delivery = await self.frontdesk.activate_notice(change.operation)
                 except sqlite3.Error:
@@ -1275,206 +1930,14 @@ class Call:
                 else:
                     email_note = " The front desk can check your confirmation email status."
             return self.say(
-                f"You're {outcome} for {self.describe(change.hold.slot)}." + email_note,
+                (
+                    f"The patient is booked for {self.describe(change.hold.slot)}."
+                    if self.booking_for_other
+                    else f"You're {outcome} for {self.describe(change.hold.slot)}."
+                )
+                + email_note,
                 outcome=outcome,
                 calendar=self._calendar([change.hold.slot], "booked"),
                 email_status=delivery if self.email_form else None,
             )
         return self.say("Your appointment was cancelled.", outcome=outcome)
-
-
-DAY_ORDINALS = {
-    word: day
-    for day, word in enumerate(
-        (
-            "first",
-            "second",
-            "third",
-            "fourth",
-            "fifth",
-            "sixth",
-            "seventh",
-            "eighth",
-            "ninth",
-            "tenth",
-            "eleventh",
-            "twelfth",
-            "thirteenth",
-            "fourteenth",
-            "fifteenth",
-            "sixteenth",
-            "seventeenth",
-            "eighteenth",
-            "nineteenth",
-            "twentieth",
-            "twenty first",
-            "twenty second",
-            "twenty third",
-            "twenty fourth",
-            "twenty fifth",
-            "twenty sixth",
-            "twenty seventh",
-            "twenty eighth",
-            "twenty ninth",
-            "thirtieth",
-            "thirty first",
-        ),
-        start=1,
-    )
-}
-DAY_ORDINAL_PATTERN = "|".join(
-    word.replace(" ", r"[-\s]+") for word in sorted(DAY_ORDINALS, key=len, reverse=True)
-)
-
-YEAR_ONES = {
-    word: number
-    for number, word in enumerate(
-        "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen "
-        "fifteen sixteen seventeen eighteen nineteen".split()
-    )
-}
-YEAR_TENS = dict(
-    zip(
-        "twenty thirty forty fifty sixty seventy eighty ninety".split(),
-        range(20, 100, 10),
-        strict=True,
-    )
-)
-YEAR_TAIL = (
-    rf"(?:oh (?:{'|'.join(list(YEAR_ONES)[1:10])})|{'|'.join(YEAR_ONES)}|"
-    rf"(?:{'|'.join(YEAR_TENS)})(?:[ -](?:{'|'.join(list(YEAR_ONES)[1:10])}))?)"
-)
-SPOKEN_YEAR = re.compile(
-    rf"\b(?:(?P<thousand>two thousand)(?: (?:and )?(?P<remainder>{YEAR_TAIL}))?"
-    rf"|(?P<century>nineteen|twenty) (?P<tail>{YEAR_TAIL}|hundred))\b"
-)
-
-
-def _spoken_year(match: re.Match[str]) -> str:
-    base = 2000 if match["thousand"] else 100 * YEAR_ONES.get(match["century"], 20)
-    tail = match["remainder"] if match["thousand"] else match["tail"]
-    if tail is None or tail == "hundred":
-        return str(base)
-    return str(
-        base
-        + sum(
-            YEAR_ONES.get(word, YEAR_TENS.get(word, 0)) for word in tail.replace("-", " ").split()
-        )
-    )
-
-
-def _date_words(text: str) -> str:
-    text = re.sub(r"\b(\d{1,2})(?:st|nd|rd|th)\b", r"\1", text.casefold())
-    text = SPOKEN_YEAR.sub(_spoken_year, " ".join(re.sub(r"[.,]", " ", text).split()))
-    text = re.sub(
-        rf"\b(?:{DAY_ORDINAL_PATTERN})\b",
-        lambda match: str(DAY_ORDINALS[" ".join(match[0].replace("-", " ").split())]),
-        text,
-    )
-    return " ".join(re.sub(r"[.,]", " ", text).split())
-
-
-def date_candidates(text: str, *, reference: date | None = None) -> tuple[date, ...]:
-    words = _date_words(text)
-    month = rf"(?P<month>{MONTH_PATTERN})"
-    year, day = r"(?P<year>\d{4})", r"(?P<day>\d{1,2})"
-    patterns = [
-        rf"{day}\s+(?:of\s+)?{month}\s+{year}",
-        rf"{month}\s+(?:the\s+)?{day}\s+{year}",
-        rf"{year}\s+{month}\s+{day}",
-        rf"{year}\s+{day}\s+(?:of\s+)?{month}",
-        rf"{year}[-/ ](?P<month>\d{{1,2}})[-/ ]{day}",
-        rf"{year}\s+(?P<month>\d{{2}})(?P<day>\d{{2}})",
-        rf"(?P<month>\d{{1,2}})/{day}/{year}",
-    ]
-    if reference:
-        patterns.extend([rf"{month}\s+(?:the\s+)?{day}", rf"{day}\s+(?:of\s+)?{month}"])
-    found = {}
-    spans = []
-    for pattern in patterns:
-        for match in re.finditer(rf"\b{pattern}\b", words):
-            start, end = match.span()
-            if any(start < right and end > left for left, right in spans):
-                continue
-            spans.append((start, end))
-            raw_month = match["month"]
-            month_number = int(raw_month) if raw_month.isdecimal() else MONTHS[raw_month]
-            day_number = int(match["day"])
-            year_number = match.groupdict().get("year")
-            if year_number is None:
-                assert reference is not None
-                year_number = reference.year + (
-                    (month_number, day_number) < (reference.month, reference.day)
-                )
-            try:
-                found[start] = date(int(year_number), month_number, day_number)
-            except ValueError:
-                continue
-    return tuple(dict.fromkeys(found[key] for key in sorted(found)))
-
-
-def parse_date(text: str, *, reference: date | None = None) -> date | None:
-    dates = date_candidates(text, reference=reference)
-    return dates[0] if len(dates) == 1 else None
-
-
-def requested_days(text: str, today: date) -> tuple[date, ...]:
-    words = _date_words(text)
-    month = rf"(?P<month>{MONTH_PATTERN})"
-    for pattern in (
-        rf"(?P<first>\d{{1,2}}) (?:or|and) (?P<second>\d{{1,2}}) (?:of )?{month}",
-        rf"{month} (?P<first>\d{{1,2}}) (?:or|and) (?P<second>\d{{1,2}})",
-    ):
-        match = re.search(rf"\b{pattern}(?: (?P<year>\d{{4}}))?\b", words)
-        if match:
-            suffix = f" {match['year']}" if match["year"] else ""
-            return tuple(
-                dict.fromkeys(
-                    day
-                    for key in ("first", "second")
-                    if (
-                        day := parse_date(f"{match['month']} {match[key]}{suffix}", reference=today)
-                    )
-                )
-            )
-    return date_candidates(words, reference=today)
-
-
-def parse_time(text: str, *, clinic_hours: bool = False) -> time | None:
-    match = re.search(r"\b(\d{1,2})(?::([0-5]\d))?\s*([ap])\.?\s*m\b", text, re.I)
-    if match:
-        hour = int(match[1])
-        if 1 <= hour <= 12:
-            return time(hour % 12 + (12 if match[3].lower() == "p" else 0), int(match[2] or 0))
-        return None
-    match = re.search(r"\b(?:at\s+)?([01]?\d|2[0-3]):([0-5]\d)\b", text)
-    if match:
-        return time(int(match[1]), int(match[2]))
-    if re.search(r"\b(?:noon|midday)\b", text):
-        return time(12)
-    if clinic_hours:
-        spoken = dict(
-            zip(
-                (
-                    "one",
-                    "two",
-                    "three",
-                    "four",
-                    "five",
-                    "six",
-                    "seven",
-                    "eight",
-                    "nine",
-                    "ten",
-                    "eleven",
-                    "twelve",
-                ),
-                range(1, 13),
-                strict=True,
-            )
-        )
-        token = text.split(maxsplit=1)[0]
-        hour = int(token) if token.isdecimal() and len(token) <= 2 else spoken.get(token)
-        if hour is not None and 1 <= hour <= 12:
-            return time(hour + 12 if hour <= 7 else hour)
-    return None

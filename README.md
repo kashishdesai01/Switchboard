@@ -25,7 +25,7 @@ Open the [Call Lab](http://127.0.0.1:8765) and select **Start call**. You can ty
 
 Use your own words in the Call Lab. For a new booking in the local demo, make up a name and a valid date of birth. Switchboard creates the demo patient record when you confirm the booking. Reuse those details on a later call to find your appointment.
 
-- **Book a visit.** Choose a day, time, or location that works for you. You can change your preferences, browse more openings, or pick a slot and confirm it after reviewing the details.
+- **Book a visit.** Say who the visit is for. Choose a day, time, or location that works for the patient. The local simulator accepts new bookings for another fictional patient after the caller confirms they have permission. The FHIR demo routes requests to book for someone else to the front desk. You can change your preferences, browse more openings, or pick a slot and confirm it after reviewing the details.
 - **Reschedule or cancel.** Return with the same fictional details to move or cancel a booking, subject to the clinic's notice window.
 - **Ask about insurance.** Find out which insurers the clinic accepts without giving your identity. Checking patient-specific coverage requires verification and an existing synthetic coverage record.
 - **Ask for staff or join the waitlist.** Request the front desk to see a handoff in Operations. Once you have a demo patient record, you can also join the waitlist while looking for an appointment. A matching cancellation or reschedule creates a follow-up task for staff.
@@ -50,8 +50,8 @@ flowchart LR
 - **Consent is tied to the exact proposal.** The server tracks the pending action and the ID of its read-back. An interruption invalidates the pending playback acknowledgement. A change in scheduling preference releases the prior hold and requires a new selection and confirmation.
 - **Concurrent callers compete on the slot version.** A hold persists its owner and expiry on the Slot. Version checks protect the hold and final write. A reschedule cancels the old appointment, releases its slot, and books the replacement in a single transaction.
 - **A lost response can be reconciled after restart.** Switchboard journals the operation ID before dispatch. The FHIR transaction commits its receipt alongside the appointment and slot changes. A background worker checks unresolved IDs for receipts and makes their outcomes visible in Operations.
-- **A slow calendar lookup leaves the media stream responsive.** The voice loop can process hangups, interruptions, and supported emergency cues while a scheduling turn is in flight. The streaming path clears queued speech on interruption and checks for stale playback acknowledgements.
-- **The call timeline records structured events.** Operations shows state transitions, timings, and outcomes. The local synthetic demo can also save new call conversations for seven days with `SWITCHBOARD_STAFF_TRANSCRIPTS=1` and an Operations token. Select **View conversation** to review the transcript and questions. Switchboard stores no call audio. Optional Claude routing helps classify ambiguous intent and extract scheduling preferences. The server validates the result and controls appointment writes.
+- **A slow calendar lookup leaves the media stream responsive.** The voice loop can process hangups, interruptions, and supported emergency cues while a scheduling turn is in flight. The streaming path clears outgoing audio on interruption and queues finalized caller speech during processing. It checks playback acknowledgements before accepting confirmation.
+- **The call timeline records structured events.** Operations shows state transitions, timings, and outcomes. The local synthetic demo can also save new call conversations for seven days with `SWITCHBOARD_STAFF_TRANSCRIPTS=1` and an Operations token. Select **View conversation** to review the transcript and questions. Switchboard stores no call audio.
 
 ## Run against HAPI FHIR R4
 
@@ -83,10 +83,15 @@ To try a second clinic, set `SWITCHBOARD_CLINIC_FILE=clinics/lakeside.toml` and 
 | **Browser streaming audio** | Set `DEEPGRAM_API_KEY` before starting the app and open the Call Lab on loopback. For a shared demo, set `SWITCHBOARD_BROWSER_AUDIO_TOKEN` to a random value of at least 24 characters and enter it in the Call Lab. Use `SWITCHBOARD_DEEPGRAM_VOICE` to change the default Helena voice. |
 | **Vapi phone demo** | Follow the [Vapi setup](docs/vapi.md) for the assistant configuration, test caller allowlist, HTTPS tunnel, and playback callbacks. |
 | **Twilio Media Streams** | Set `SWITCHBOARD_PUBLIC_ORIGIN`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `DEEPGRAM_API_KEY`, and `SWITCHBOARD_DEMO_CALLERS` (comma-separated E.164 test numbers). Point the inbound voice webhook at `POST /twilio/voice`. Set `SWITCHBOARD_DEMO_STAFF` to enable direct transfer to a test number. Use a Twilio account with Media Streams enabled. |
-| **Optional Claude routing** | Set `ANTHROPIC_API_KEY` and `SWITCHBOARD_CLAUDE_MODEL`. To opt in from the browser text simulator, also set `SWITCHBOARD_ENABLE_BROWSER_MODEL=1`. |
+| **Optional Claude interpretation** | Set `ANTHROPIC_API_KEY` and `SWITCHBOARD_CLAUDE_MODEL`. Claude interprets each caller turn using the current conversation step and clinic configuration. Switchboard validates the response and owns identity verification, availability, holds and confirmed writes. To opt in from the browser text simulator, also set `SWITCHBOARD_ENABLE_BROWSER_MODEL=1`. Use synthetic details for these calls. |
+| **Local conversation interpretation** | Run Ollama on this machine with `qwen2.5:3b` and start Switchboard with `SWITCHBOARD_OLLAMA_MODEL=qwen2.5:3b`. Set `SWITCHBOARD_OLLAMA_PORT` if Ollama uses a port other than 11434. The model interprets caller replies using the current step and recent turns in the call lab and phone demo. Switchboard verifies identity, looks up availability, and requires a separate confirmation for appointment changes. |
 | **Confirmation email** | The demo saves confirmations to Operations by default. To deliver to test inboxes, set `SWITCHBOARD_SMTP_HOST`, `SWITCHBOARD_SMTP_FROM`, and `SWITCHBOARD_SMTP_RECIPIENTS` (comma-separated allowlist). The relay must support STARTTLS. The port defaults to 587, with optional `SWITCHBOARD_SMTP_PORT`, `SWITCHBOARD_SMTP_USERNAME`, and `SWITCHBOARD_SMTP_PASSWORD`. |
 
 ## Verification
+
+Vapi handles transcription, speech synthesis, endpointing and interruption on the Vapi phone number. The browser streaming audio and Twilio paths run Switchboard's own turn manager. The signed Twilio replay simulates the carrier stream. Live phone latency and Twilio call performance are unmeasured. [Local verification results](docs/verification.md)
+
+The first nine commits were assembled retrospectively for the initial publication. Their timestamps are editorial dates and should not be used to date the work.
 
 ```bash
 uv run ruff check .
@@ -95,7 +100,7 @@ uv run pytest -q
 uv run python -m evals.run_text
 ```
 
-The local test suite passed **64 tests**, with **3 HAPI integration tests skipped**. The text evaluator passed **64 of 64 runs** across 32 authored scenarios and two clinic configurations. It detected **zero violations** in its checks for exact appointment and slot state, patient-scoped reads, the turn authorizing each write, and expected emergency and handoff replies.
+The text evaluator checks exact appointment and slot state, patient-scoped reads, the turn authorizing each write, and expected safety and handoff replies across two clinic configurations. The safety suite also covers current emergencies, negation, medical and family history, and an emergency reported during a booking.
 
 With the Docker stack running, verify version conflicts, concurrent holds, transaction rollback, lost responses, and hold expiry against HAPI. The deployment smoke test books a visit through the WebSocket and checks both the operation journal and the resulting FHIR Appointment.
 

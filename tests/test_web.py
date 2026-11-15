@@ -7,8 +7,8 @@ from starlette.websockets import WebSocketDisconnect
 
 from switchboard.api import app
 from switchboard.config import BAYVIEW
-from switchboard.conversation import parse_date
 from switchboard.scheduling import instant, utc_now
+from switchboard.spoken import parse_date
 from switchboard.store import DemoStore
 
 
@@ -59,6 +59,7 @@ def test_browser_call_path(tmp_path, monkeypatch):
                 return socket.receive_json()
 
             say("book a first visit")
+            say("For me.")
             say("Maria Lopez")
             dob = say("1984-07-02")
             socket.send_json({"type": "displayed", "id": dob["id"]})
@@ -94,6 +95,7 @@ def test_third_weekend_option_books_the_displayed_doctor_and_time(tmp_path, monk
             return socket.receive_json()
 
         say("Book a follow-up this Saturday")
+        say("For me.")
         say("Maria Lopez")
         identity = say("July 2, 1984")
         offered = say("That's correct", identity["id"])["calendar"]
@@ -141,6 +143,7 @@ def test_requested_time_and_natural_selection(tmp_path, monkeypatch, legacy_clie
             return say("yes", reply_to=reply["id"])
 
         say(f"Can you book a meeting on {friday:%A %B} {friday.day} at 9:01 a.m.?")
+        say("For me.")
         say("Sasha Mendez")
         options = confirm(say("17 April 1994"))
         assert "I don't have a 9:01 AM opening" in options["text"]
@@ -174,6 +177,7 @@ def test_browser_can_correct_misheard_sample_name_without_repeating_dob(tmp_path
             socket.send_json({"type": "played", "id": reply["id"]})
 
         say("I want to book a visit")
+        say("For me.")
         say("it's Mario Lopez")
         wrong = say("July 2, 1984")
         assert "Mario Lopez, born July 2, 1984" in wrong["text"]
@@ -229,6 +233,7 @@ def test_browser_books_an_unseeded_patient_with_explicit_confirmation(tmp_path, 
             return say("Yes, that's right")
 
         unavailable = say("Can I book next week with Doctor Reyes?")
+        unavailable = say("For me.")
         assert "Dr. Reyes isn't on the schedule" in unavailable["text"]
         assert "name" in say("yes")["text"]
         assert "date of birth" in say("My full name is Jamie O'Neill")["text"]
@@ -283,6 +288,8 @@ def test_browser_books_and_finds_unseeded_names(tmp_path, monkeypatch, name, ret
                     return say("yes")
 
                 say(intent)
+                if outcome == "booked":
+                    say("For me.")
                 assert "date of birth" in say(f"My name is {patient_name}")["text"]
                 assert "Option 1" in confirm(say("14th May 1992"))["text"]
                 proposal = say("option one")
@@ -318,11 +325,11 @@ def test_operations_is_token_gated_and_omits_identity(tmp_path, monkeypatch):
         with client.websocket_connect("/call", headers={"origin": "http://testserver"}) as socket:
             socket.receive_json()
             socket.receive_json()
-            for text in ["book", "Maria Lopez", "1984-07-02"]:
+            for text in ["book", "For me.", "Maria Lopez", "1984-07-02"]:
                 socket.send_json({"type": "text", "text": text})
                 socket.receive_json()
             trace = client.get("/api/operations", headers={"Authorization": f"Bearer {token}"})
             assert trace.status_code == 200
-            assert len(trace.json()["live"][0]["events"]) == 4
+            assert len(trace.json()["live"][0]["events"]) == 5
             assert "Maria Lopez" not in trace.text
             assert "1984-07-02" not in trace.text

@@ -37,6 +37,7 @@ async def main() -> None:
                 return json.loads(await ws.recv())
 
             await say("book a follow-up next week in the afternoon")
+            await say("For me.")
             await say("Maria Lopez")
             dob = await say("1984-07-02")
             assert dob["confirmation"]

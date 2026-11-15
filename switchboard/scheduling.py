@@ -158,6 +158,7 @@ class Scheduling:
         before: time | None = None,
         exclude: set[str] | None = None,
         days: tuple[date, ...] = (),
+        limit: int = 3,
     ) -> list[Resource]:
         now = self.now()
         slots = await self.store.search("Slot", status="free", start=f"ge{now.isoformat()}")
@@ -220,15 +221,15 @@ class Scheduling:
                 first_by_day.setdefault(
                     instant(slot["start"]).astimezone(self.clinic.timezone).date(), slot
                 )
-            spread = list(first_by_day.values())[:3]
+            spread = list(first_by_day.values())[:limit]
             ids = {slot["id"] for slot in spread}
             return sorted(
-                (spread + [slot for slot in ranked if slot["id"] not in ids])[:3], key=rank
+                (spread + [slot for slot in ranked if slot["id"] not in ids])[:limit], key=rank
             )
         if not self.clinic.daily_demo_slots or requested_time is not None:
-            return ranked[:3]
+            return ranked[:limit]
 
-        # If the caller is flexible, prefer different times over three versions of
+        # If the caller is flexible, prefer different times over several versions of
         # the same time. Keep simultaneous openings as a fallback on a sparse day.
         distinct = []
         seen = set()
@@ -237,10 +238,10 @@ class Scheduling:
             if start not in seen:
                 seen.add(start)
                 distinct.append(slot)
-                if len(distinct) == 3:
+                if len(distinct) == limit:
                     return distinct
         chosen_ids = {slot["id"] for slot in distinct}
-        return (distinct + [slot for slot in ranked if slot["id"] not in chosen_ids])[:3]
+        return (distinct + [slot for slot in ranked if slot["id"] not in chosen_ids])[:limit]
 
     def provider_for(self, resource: Resource) -> str:
         if "schedule" in resource:
@@ -285,7 +286,7 @@ class Scheduling:
         }
         return next(iter(addresses)) if len(addresses) == 1 else None
 
-    async def appointments(self, patient: str) -> list[Resource]:
+    async def appointments(self, patient: str, *, limit: int | None = 2) -> list[Resource]:
         records = await self.store.search(
             "Appointment", patient=f"Patient/{patient}", status="booked"
         )
@@ -296,7 +297,7 @@ class Scheduling:
                 if uses_patient(item, patient) and instant(item["start"]) > self.now()
             ),
             key=lambda item: instant(item["start"]),
-        )[:2]
+        )[:limit]
 
     async def coverage(self, patient: str) -> tuple[str, ...]:
         reference = f"Patient/{patient}"

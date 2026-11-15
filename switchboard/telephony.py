@@ -21,7 +21,8 @@ from starlette.datastructures import FormData
 from twilio.request_validator import RequestValidator
 from websockets.exceptions import WebSocketException
 
-from switchboard.conversation import EMERGENCY_SCRIPT, Call
+from switchboard.conversation import Call
+from switchboard.safety import EMERGENCY_SCRIPT
 from switchboard.voice import Deepgram, Speech, VoiceCall
 
 router = APIRouter(prefix="/twilio")
@@ -326,9 +327,10 @@ async def media(socket: WebSocket):
         voice = VoiceCall(
             Call(
                 socket.app.state.scheduling,
-                socket.app.state.intent_router,
+                socket.app.state.turn_interpreter,
                 trace,
                 frontdesk=socket.app.state.frontdesk,
+                voice=True,
                 allow_registration=socket.app.state.allow_registration,
             ),
             adapter,

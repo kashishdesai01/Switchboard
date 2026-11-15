@@ -1,6 +1,6 @@
 # Call Switchboard through Vapi
 
-Vapi provides the number and handles transcription and speech. Switchboard handles the conversation and uses the same calendar, confirmations, email outbox, and staff work queue as the browser demo. The assistant configuration uses Deepgram Nova 3 and Helena at 0.9× speed. Vapi can supply both speech services through its own integration.
+Vapi provides the number and handles transcription, speech synthesis, turn-taking and interruption. Switchboard handles the conversation and uses the same calendar, confirmations, email outbox, and staff work queue as the browser demo. The assistant configuration uses Deepgram Nova 3 and Helena at 0.9× speed. Vapi can supply both speech services through its own integration.
 
 Use fictional patient details. Vapi receives the conversation, and this is a synthetic clinic demo. The supplied configuration turns off recordings, transcript artifacts, and SIP packet captures. Vapi's free U.S. number accepts inbound calls. Calls and speech use Vapi credits. Check your balance before testing. [Vapi phone numbers](https://docs.vapi.ai/free-telephony) · [Vapi pricing](https://vapi.ai/pricing)
 
@@ -54,9 +54,9 @@ Use fictional patient details. Vapi receives the conversation, and this is a syn
 
 4. In **Phone Numbers → Create Phone Number → Free Vapi Number**, choose a U.S. area code. Under **Inbound Settings**, select **Switchboard phone demo** and save. Once the number activates, dial it from the cell number in step 1 with caller ID enabled. The dashboard's browser **Talk** button uses a web call, so use your phone for this test.
 
-5. Say “Book a follow-up this Saturday.” You can use **Maria Lopez**, born **July 2, 1984**, or use a fictional name and date of birth to book a first visit. Confirm the readback, choose an option, and confirm the final time after Helena finishes speaking. Hang up after hearing the result. Open [local Operations](http://127.0.0.1:8766/operations) and use the operations token from step 1 to check the call outcome and email outbox. Ask for the front desk in a separate call to test the staff work queue.
+5. Say “Book a follow-up this Saturday.” When asked who the visit is for, say “For me.” You can use **Maria Lopez**, born **July 2, 1984**, or use a fictional name and date of birth to book a first visit. Confirm the readback, choose an option, and confirm the final time after Helena finishes speaking. Hang up after hearing the result. Open [local Operations](http://127.0.0.1:8766/operations) and use the operations token from step 1 to check the call outcome and email outbox. Ask for the front desk in a separate call to test the staff work queue.
 
-If you hear the greeting but the call won't continue, check that the tunnel is running and the configured model URL ends in `/vapi`. A 401 in the server log means the Vapi request's secret header and the app secret differ. If a readback repeats after you confirm, check that the assistant is sending its playback events to `/vapi/events` with the same secret, then wait for Helena to finish before confirming again.
+If you hear the greeting but the call won't continue, check that the tunnel is running and the configured model URL ends in `/vapi`. A 401 in the server log means the Vapi request's secret header and the app secret differ. If Switchboard cannot verify playback, it repeats the details with a four-digit code at the end. If the details are correct, say the code after the read-back. A fresh code applies to each prompt.
 
 ## Refresh speech settings on an existing assistant
 

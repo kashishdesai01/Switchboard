@@ -21,7 +21,7 @@ from switchboard.config import HORIZON_DAYS, Clinic, configured_clinic
 from switchboard.conversation import Call, Reply
 from switchboard.fixtures import synthetic_resources, synthetic_slots
 from switchboard.frontdesk import FrontDesk, MailSettings
-from switchboard.intents import ClaudeRouter
+from switchboard.intents import ClaudeRouter, OllamaInterpreter
 from switchboard.operations import Operations
 from switchboard.operations import router as operations_router
 from switchboard.scheduling import Scheduling, utc_now
@@ -141,6 +141,15 @@ async def lifespan(app: FastAPI):
         app.state.intent_router = (
             ClaudeRouter(vendor_client, os.environ["ANTHROPIC_API_KEY"], model) if model else None
         )
+        local_model = os.getenv("SWITCHBOARD_OLLAMA_MODEL")
+        local_interpreter = (
+            OllamaInterpreter(
+                vendor_client, local_model, int(os.getenv("SWITCHBOARD_OLLAMA_PORT", "11434"))
+            )
+            if local_model
+            else None
+        )
+        app.state.turn_interpreter = local_interpreter or app.state.intent_router
         app.state.twilio = TwilioConfig.from_env()
         if app.state.twilio:
             app.state.tickets = StreamTickets(
@@ -167,7 +176,7 @@ async def lifespan(app: FastAPI):
         app.state.frontdesk = FrontDesk(app.state.ops, MailSettings.configured())
         app.state.ops.frontdesk = app.state.frontdesk
         app.state.vapi = vapi = VapiCalls.configured(app.state)
-        app.state.browser_router = (
+        app.state.browser_router = local_interpreter or (
             app.state.intent_router
             if not fhir_url and os.getenv("SWITCHBOARD_ENABLE_BROWSER_MODEL") == "1"
             else None
@@ -178,6 +187,8 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(reconcile(app.state.scheduling, app.state.ops)),
             asyncio.create_task(frontdesk_worker(app.state.scheduling, app.state.frontdesk)),
         ]
+        if local_interpreter:
+            workers.append(asyncio.create_task(local_interpreter.keep_loaded()))
         if isinstance(store, DemoStore) and clinic.daily_demo_slots:
             workers.append(asyncio.create_task(refresh_demo_slots(store, clinic, seeded_at)))
         if app.state.browser_audio or app.state.twilio:
@@ -288,6 +299,7 @@ async def browser_call(socket: WebSocket):
         app.state.browser_router,
         trace,
         allow_registration=app.state.allow_registration,
+        voice=socket.query_params.get("spoken") == "1",
         frontdesk=app.state.frontdesk,
         email_form=True,
     )

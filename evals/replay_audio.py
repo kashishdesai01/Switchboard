@@ -33,7 +33,7 @@ class Scenario:
 
 
 IDENTITY = ("Maria Lopez", "July 2, 1984", "yes")
-BOOKING = ("I want to book a follow up next week", *IDENTITY, "option one")
+BOOKING = ("I want to book a follow up next week", "For me.", *IDENTITY, "option one")
 SCENARIOS = {
     "booking": Scenario((*BOOKING, "yes"), "booked"),
     "declined-booking": Scenario((*BOOKING, "no"), "declined"),

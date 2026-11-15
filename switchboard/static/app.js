@@ -196,7 +196,8 @@ function start() {
   $("call-status").textContent = "Connecting…";
   $("call-button").textContent = "End call";
   const scheme = location.protocol === "https:" ? "wss" : "ws";
-  const activeSocket = new WebSocket(`${scheme}://${location.host}/call`);
+  const spoken = audio.checked ? "?spoken=1" : "";
+  const activeSocket = new WebSocket(`${scheme}://${location.host}/call${spoken}`);
   socket = activeSocket;
   activeSocket.onmessage = ({ data }) => {
     if (socket !== activeSocket) return;

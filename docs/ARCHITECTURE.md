@@ -6,6 +6,8 @@ flowchart LR
     Twilio["Twilio Media Streams"] --> Voice["Turn manager and speech services"]
     Browser --> Voice
     Voice --> Call
+    Vapi["Vapi speech and turn-taking"] --> Call
+    Call --> Model["Optional structured turn interpreter"]
     Call --> Policy["Scheduling policy"]
     Call --> Journal["Operation journal and call timeline"]
     Policy --> FHIR["HAPI FHIR R4 + Postgres"]
@@ -28,11 +30,13 @@ The text and media transports share the conversation state machine. Streaming au
 
 The recognizer waits for the full date of birth or Deepgram's utterance-end event after a partial date. Emergency and staff-request cues bypass that wait. On a recognition disconnect, the call invalidates any pending playback acknowledgement and retries once. It feeds up to 500 ms of recent audio into the new stream, aligns the new stream's timestamps to the call, and ignores results that begin inside the replay. The caller is prompted to repeat and must confirm a fresh read-back. Exhausted retries follow the staff handoff path.
 
-A voice call owns one active scheduling turn. The media loop continues consuming hangup, emergency, staff-request, and recognizer events while that turn is in flight. It cancels and joins the turn on teardown. Cancellation after an authorized FHIR request may leave an unknown outcome. The existing operation journal and receipt worker reconcile that state, and a booked slot remains busy. A slow turn can play a cached cue after 1.5 seconds. Its playback mark is separate from read-back marks and the audio replay excludes it from substantive response latency.
+A voice call owns one active scheduling turn. The media loop queues finalized caller turns in order while the active turn runs and asks the caller to repeat if the queue fills. Queued speech cannot confirm a newly issued read-back. Deterministic emergency cues can interrupt an active turn. It cancels and joins the turn on teardown. Cancellation after an authorized FHIR request may leave an unknown outcome. The existing operation journal and receipt worker reconcile that state, and a booked slot remains busy. A slow turn can play a cached cue after 1.5 seconds. Its playback mark is separate from read-back marks and the audio replay excludes it from substantive response latency.
 
 Text and voice use templates for appointment facts. A short affirmation is only a mutation authorization in the pending confirmation state. The phone adapter validates Twilio signatures at the webhook and WebSocket handshake and uses a call-bound one-time ticket. If the stream closes, Twilio fetches the post-stream outcome and selects the relevant end or staff transfer path. A transfer is a direct dial with a recorded attempt and dial-result callback. If the emergency prompt did not complete, the post-stream webhook supplies a Twilio speech fallback.
 
-The emergency detector recognizes a bounded set of cues in finalized speech and plays a self-contained instruction. Recognition depends on the transcript and detector coverage. The clinic has no clinical triage workflow.
+The emergency detector checks finalized text for acute warning signs and scopes historical and negated language to the relevant clause. When configured, the model can also raise an emergency flag. Clear acute assertions can route immediately. Ambiguous condition mentions go to the configured model. When interpretation is unavailable, Switchboard asks whether the condition is happening now and gives the emergency instruction without closing the call. The alert plays an instruction to call 911. This behavior has synthetic test coverage and depends on transcription and detector coverage. [MedlinePlus emergency signs](https://medlineplus.gov/ency/article/001927.htm) · [American Stroke Association warning signs](https://www.stroke.org/en/about-stroke/stroke-symptoms)
+
+The interpreter receives the latest caller text, the conversation step and clinic configuration. It can return a stage-specific action, a normalized value, and independent emergency and staff flags. Model output cannot authorize appointment writes. The state machine checks the verified patient, pending change, playback acknowledgement and explicit caller consent. An unavailable interpreter leaves the deterministic safety check and supported scheduling language available. Use synthetic caller details with either provider.
 
 ## Operations
 

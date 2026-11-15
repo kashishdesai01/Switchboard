@@ -53,7 +53,9 @@ def test_lost_write_response_and_idempotent_retry(tmp_path):
 
 
 async def authenticate(call, intent):
-    await call.handle(intent)
+    reply = await call.handle(intent)
+    if "for you or for someone else" in reply.text:
+        await call.handle("For me.")
     await call.handle("Maria Lopez")
     reply = await call.handle("1984-07-02")
     call.playback_finished(reply.id)

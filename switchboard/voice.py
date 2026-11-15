@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+from collections import deque
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass
@@ -17,13 +18,13 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import WebSocketException
 
 from switchboard.conversation import (
-    EMERGENCY,
-    STAFF,
+    EXPLICIT_STAFF,
     Call,
     Reply,
     answer_to_confirmation,
-    parse_date,
 )
+from switchboard.safety import emergency_detected
+from switchboard.spoken import birth_dates
 
 SAMPLE_RATE = 8000
 REPLAY_SAMPLES = SAMPLE_RATE // 2
@@ -31,6 +32,7 @@ TURN_TIMEOUT_SECONDS = 15
 PLAYBACK_TIMEOUT_SECONDS = 20
 PLAYBACK_MARK_GRACE_SECONDS = 5
 FILLER_DELAY_SECONDS = 1.5
+MAX_QUEUED_TURNS = 8
 FILLER_TEXT = "One moment while I check."
 
 
@@ -214,8 +216,12 @@ async def speech_events(
                     combined = " ".join(segments)
                     unfinished = re.search(
                         r"\b(?:um|uh|and|on|at|is)$", combined.rstrip(".!? "), re.I
-                    ) or (awaiting_date() and parse_date(combined) is None)
-                    if not unfinished or EMERGENCY.search(combined) or STAFF.search(combined):
+                    ) or (awaiting_date() and not birth_dates(combined))
+                    if (
+                        not unfinished
+                        or emergency_detected(combined)
+                        or EXPLICIT_STAFF.search(combined)
+                    ):
                         await finish()
 
 
@@ -225,7 +231,7 @@ def interrupts(text: str) -> bool:
         return False
     return (
         normalized in {"stop", "wait", "no"}
-        or bool(EMERGENCY.search(normalized) or STAFF.search(normalized))
+        or bool(emergency_detected(normalized) or EXPLICIT_STAFF.search(normalized))
         or len(normalized.split()) >= 2
     )
 
@@ -255,6 +261,8 @@ class VoiceCall:
         self.onset_sample: int | None = None
         self.last_final: float | None = None
         self.turn: asyncio.Task[Reply | None] | None = None
+        self.pending: deque[Speech] = deque()
+        self.pending_overflow = False
         self.recognition_available = True
         self.recognition_exhausted = False
         self.deferred_reply: Reply | None = None
@@ -444,16 +452,36 @@ class VoiceCall:
             await self._stop(clear=False)
             await self.call.close()
 
+    def _enqueue_turn(self, event: Speech) -> None:
+        if len(self.pending) == MAX_QUEUED_TURNS:
+            self.pending_overflow = True
+            if self.call.trace:
+                self.call.trace.add("caller_queue_full")
+            return
+        self.pending.append(event)
+        if self.call.trace:
+            self.call.trace.add("caller_turn_queued")
+
+    async def _next_event(self) -> tuple[Speech, bool]:
+        # Transport events already received take priority, including acute reports
+        # and hangups. Drain caller speech in order when the current reply finishes.
+        if self.pending and not self.turn and not self.reply and self.events.empty():
+            return self.pending.popleft(), True
+        return await self.events.get(), False
+
     async def _loop(self) -> str:
         silence = 0
         while True:
+            if self.pending_overflow and not (self.turn or self.reply or self.pending):
+                self.pending_overflow = False
+                await self._play(self.call.say("I missed part of that. Could you repeat it?"))
             try:
                 if self.turn:
                     async with asyncio.timeout_at(self.filler_due):
-                        event = await self.events.get()
+                        event, queued = await self._next_event()
                 else:
-                    event = await asyncio.wait_for(
-                        self.events.get(),
+                    event, queued = await asyncio.wait_for(
+                        self._next_event(),
                         timeout=max(0, self.playback_deadline - monotonic()) if self.reply else 6,
                     )
             except TimeoutError:
@@ -524,35 +552,39 @@ class VoiceCall:
                     round(SAMPLE_RATE * event.onset) if event.onset is not None else None
                 )
                 continue
-            if event.kind == "final" and EMERGENCY.search(event.text):
+            if event.kind == "final" and emergency_detected(event.text):
                 if self.reply and self.reply.outcome == "emergency":
                     continue
                 self.last_final = monotonic()
                 await self._cancel_turn()
-                reply = await self.call.handle(event.text)
+                self.pending.clear()
                 await self._clear_filler()
                 if self.reply:
                     await self._stop()
                 if self.on_caller:
                     await self.on_caller(event.text)
-                await self._play(reply)
+                await self._play(self.call.emergency_reply(event.text))
                 continue
             if self.turn:
                 if event.kind in {"interim", "final", "digit"} and (
                     event.kind == "digit" or interrupts(event.text)
                 ):
                     await self._clear_filler()
-                staff_requested = (event.kind == "final" and STAFF.search(event.text)) or (
+                staff_requested = (event.kind == "final" and EXPLICIT_STAFF.search(event.text)) or (
                     event.kind == "digit" and event.text == "0" and self.call.stage != "keypad"
                 )
                 if event.kind in {"final", "digit"}:
                     self.overlap = False
                     self.onset_sample = None
-                    if event.kind == "final" and not staff_requested and self.call.trace:
-                        self.call.trace.add("caller_turn_skipped", state="processing")
-                if staff_requested and self.call.stage != "closed":
-                    await self._cancel_turn()
-                    await self._play(await self.call.handle(event.text))
+                    if staff_requested and self.call.stage != "closed":
+                        await self._cancel_turn()
+                        self.pending.clear()
+                        await self._play(await self.call.handle(event.text))
+                    elif not staff_requested:
+                        self._enqueue_turn(event)
+                continue
+            if self.pending and not queued and not self.reply and event.kind in {"final", "digit"}:
+                self._enqueue_turn(event)
                 continue
             if event.kind == "mark" and self.reply and event.text == self.reply.id:
                 self.call.playback_finished(event.text)
@@ -578,8 +610,10 @@ class VoiceCall:
                         (not conversational_answer and not interrupts(event.text))
                         or (heard and f" {heard} " in f" {speaking} ")
                     ):
-                        if event.kind == "final" and self.call.trace:
-                            self.call.trace.add("caller_turn_skipped", state="playback")
+                        if event.kind == "final" and not (
+                            heard and f" {heard} " in f" {speaking} "
+                        ):
+                            self._enqueue_turn(event)
                         continue
                     await self._stop()
                 if event.kind == "interim":
@@ -591,7 +625,7 @@ class VoiceCall:
                     sample is not None and sample < self.playback_end_sample
                     for sample in (self.onset_sample, word_sample)
                 )
-                if self.overlap or began_before_playback_end:
+                if queued or self.overlap or began_before_playback_end:
                     self.call.interrupt()
                 self.overlap = False
                 self.onset_sample = None
