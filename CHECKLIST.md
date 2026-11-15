@@ -5,7 +5,7 @@ Outcome: every gap found in the 2026-11-15 review is covered by a test and fixed
 Baseline before phase 1: `uv run pytest -q` → 158 passed, 3 skipped; `uv run python -m evals.run_text` → 64/64; `uv run ruff check .` clean.
 Every phase must keep that baseline green, and must remove the xfail marks for the gaps it closes.
 
-- [ ] **Phase 1: Lock in every gap as a failing test.**
+- [x] **Phase 1: Lock in every gap as a failing test.**
   Add `tests/test_gaps.py`, with one `xfail(strict=True)` test per finding: proxy phrasings ("someone else", "it's for John Smith", "my father needs an appointment", "I'm calling for my father…", "cancel my mom's appointment" vs "…for my mom"), clarifying dead end ("no, it was in the past, I need to book a follow-up"), missed emergencies (suicidal ideation, face/throat swelling, can't swallow, open fracture), double booking, third appointment unreachable in text, name in opener ("hi this is Maria Lopez"), call ends after hours/insurance/no-appointments.
   Done: `uv run pytest -q tests/test_gaps.py` exits 0 with every test reported as xfailed.
 
