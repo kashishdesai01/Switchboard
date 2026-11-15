@@ -35,8 +35,8 @@ class Scenario:
 IDENTITY = ("Maria Lopez", "July 2, 1984", "yes")
 BOOKING = ("I want to book a follow up next week", "For me.", *IDENTITY, "option one")
 SCENARIOS = {
-    "booking": Scenario((*BOOKING, "yes"), "booked"),
-    "declined-booking": Scenario((*BOOKING, "no"), "declined"),
+    "booking": Scenario((*BOOKING, "yes", "no thanks"), "booked"),
+    "declined-booking": Scenario((*BOOKING, "no", "no thanks"), "declined"),
     "coverage": Scenario(("Check my coverage", *IDENTITY), "info_only"),
     "staff-handoff": Scenario(("I need to talk to a human.",), "handoff"),
     "emergency": Scenario(("I can't breathe. I have chest pain.",), "emergency"),

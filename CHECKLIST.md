@@ -25,7 +25,7 @@ Every phase must keep that baseline green, and must remove the xfail marks for t
   Session state records caller and patient separately. Book, reschedule and cancel all ask who the patient is and get permission when the caller isn't the patient. Proxy policy is set per backend in the clinic config. Prompts say "the patient", and staff work items record the real request type.
   Done: the proxy gap tests pass, including the possessive and "for my mom" phrasings behaving the same way.
 
-- [ ] **Phase 6: More than one task per call.**
+- [x] **Phase 6: More than one task per call.**
   Split outcomes into ones that end the call (emergency, handoff, goodbye) and ones that finish a task. After a finished task, ask "Anything else?" and keep the verified identity. Browser, Vapi and Twilio close only when the call ends. A call trace records several outcomes.
   Done: the call-continuation gap test passes; `tests/test_web.py` and `tests/test_vapi.py` are green.
 

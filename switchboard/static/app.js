@@ -210,7 +210,8 @@ function start() {
       return;
     }
     waiting = false;
-    terminal = Boolean(reply.outcome);
+    // A finished task keeps the call open for the next request.
+    terminal = Boolean(reply.ends_call);
     if (terminal) setVoice(false);
     message("Switchboard", reply.text);
     showVisit(reply);

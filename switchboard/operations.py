@@ -32,6 +32,14 @@ RETENTION_SECONDS = 30 * 24 * 60 * 60
 TRANSCRIPT_SECONDS = 7 * 24 * 60 * 60
 RECONCILIATION_GRACE_SECONDS = 15
 RECONCILIATION_BATCH = 50
+# The single call outcome prefers these over the last finished task.
+OUTCOME_PRECEDENCE = ("emergency", "needs_review", "handoff")
+
+
+def summary_outcome(outcomes: list[str]) -> str | None:
+    return next((item for item in OUTCOME_PRECEDENCE if item in outcomes), None) or (
+        outcomes[-1] if outcomes else None
+    )
 
 
 @dataclass
@@ -42,9 +50,17 @@ class Trace:
     operations: "Operations"
     started: float = field(default_factory=time)
     outcome: str | None = None
+    # Each task's outcome in order. ``outcome`` summarizes them for the call.
+    outcomes: list[str] = field(default_factory=list)
     events: deque = field(default_factory=lambda: deque(maxlen=128))
     work: tuple[str, dict] | None = None
+    # Staff work from other tasks in the same call, kept beside ``work``.
+    more_work: list[tuple[str, dict]] = field(default_factory=list)
     transcript: deque = field(default_factory=lambda: deque(maxlen=400), repr=False)
+
+    def add_outcome(self, outcome: str) -> None:
+        self.outcomes.append(outcome)
+        self.outcome = summary_outcome(self.outcomes)
 
     def record(self, speaker: str, text: str) -> None:
         if self.operations.capture_transcripts and text.strip():
@@ -83,6 +99,7 @@ class Trace:
             "config_version": self.config_version,
             "started": self.started,
             "outcome": self.outcome,
+            "outcomes": list(self.outcomes),
             "events": list(self.events),
         }
 
@@ -155,11 +172,14 @@ class Operations:
                     (trace.id, trace.started, json.dumps(list(trace.transcript))),
                 )
             if self.frontdesk and trace.work:
-                reason, context = trace.work
-                db.execute(
-                    "INSERT OR IGNORE INTO staff_work (id, trace_id, reason, context, updated) VALUES (?, ?, ?, ?, ?)",
-                    (trace.id, trace.id, reason, json.dumps(context), time()),
-                )
+                items = [(trace.id, trace.work)] + [
+                    (f"{trace.id}-{index}", item) for index, item in enumerate(trace.more_work, 1)
+                ]
+                for task_id, (reason, context) in items:
+                    db.execute(
+                        "INSERT OR IGNORE INTO staff_work (id, trace_id, reason, context, updated) VALUES (?, ?, ?, ?, ?)",
+                        (task_id, trace.id, reason, json.dumps(context), time()),
+                    )
 
     def _begin_mutation(self, trace_id: str, operation: str, action: str) -> None:
         with closing(self.connect()) as db, db:

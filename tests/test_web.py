@@ -269,7 +269,8 @@ def test_browser_books_and_finds_unseeded_names(tmp_path, monkeypatch, name, ret
     monkeypatch.setenv("SWITCHBOARD_DB", str(database))
     with TestClient(app) as client:
         for intent, patient_name, outcome in (
-            ("book next week", name, "booked"),
+            # "next wednesday" is always 3+ days out, beyond the 24-hour cancel window.
+            ("book next wednesday", name, "booked"),
             ("cancel my appointment", returning_name, "cancelled"),
         ):
             with client.websocket_connect(

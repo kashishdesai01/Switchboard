@@ -29,7 +29,7 @@ def test_cancel_moms_appointment_end_to_end(tmp_path):
         assert reply.text.startswith("Cancel the patient's appointment on"), reply.text
         reply = await session.say("yes")
         assert reply.outcome == "cancelled"
-        assert reply.text == "The patient's appointment was cancelled."
+        assert reply.text.startswith("The patient's appointment was cancelled.")
         assert await clinic.booked() == []
         assert session.call.party == Party("other", "mom")
 
@@ -69,7 +69,7 @@ def test_permission_no_makes_no_changes(tmp_path):
         await session.say("I need to cancel the appointment for my mom")
         reply = await session.say("no")
         assert reply.outcome == "declined"
-        assert reply.text == "Okay. I haven't made any changes."
+        assert reply.text.startswith("Okay. I haven't made any changes.")
         assert len(await clinic.booked()) == 1
         assert session.trace.work is None
 
@@ -170,7 +170,7 @@ def test_cancel_my_appointment_is_unchanged(tmp_path):
         reply = await session.say("one")
         assert reply.text.startswith("Cancel your appointment on")
         reply = await session.say("yes")
-        assert reply.text == "Your appointment was cancelled."
+        assert reply.text.startswith("Your appointment was cancelled.")
         assert session.call.party.patient == "self"
         assert await clinic.booked() == []
 

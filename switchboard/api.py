@@ -332,7 +332,7 @@ async def browser_call(socket: WebSocket):
                         started = monotonic()
                         reply = await call.handle(text)
                         await send_reply(socket, reply, started)
-                        if reply.outcome:
+                        if reply.ends_call:
                             # The browser plays the final response locally after disconnect.
                             await socket.close()
                             return

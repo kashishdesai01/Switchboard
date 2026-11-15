@@ -397,13 +397,7 @@ def test_name_in_opener_is_used(tmp_path):
 
 @pytest.mark.parametrize(
     "question",
-    [
-        pytest.param("what are your hours?", marks=gap("the call closes after the hours answer")),
-        pytest.param(
-            "do you accept Aetna insurance?",
-            marks=gap("the call closes after the insurance answer"),
-        ),
-    ],
+    ["what are your hours?", "do you accept Aetna insurance?"],
 )
 def test_call_continues_after_info(question, tmp_path):
     async def scenario():
@@ -416,7 +410,6 @@ def test_call_continues_after_info(question, tmp_path):
     run(scenario())
 
 
-@gap("the call closes when there are no upcoming appointments to change")
 def test_call_continues_after_no_appointments(tmp_path):
     async def scenario():
         clinic = Clinic(tmp_path)

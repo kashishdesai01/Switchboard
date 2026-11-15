@@ -343,7 +343,7 @@ async def completion(request: Request, calls: Annotated[VapiCalls, Depends(autho
             await calls.finish(session)
             return speech(UNAVAILABLE, stream)
         spoken = reply.text
-        if reply.outcome:
+        if reply.ends_call:
             await calls.finish(session)
         elif reply.confirmation:
             code = None

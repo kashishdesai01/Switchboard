@@ -510,7 +510,7 @@ class VoiceCall:
                 reply = await self.turn
                 self.turn = None
                 await self._clear_filler()
-                if reply and (reply.outcome or self.recognition_available):
+                if reply and (reply.ends_call or self.recognition_available):
                     await self._play(reply)
                 elif self.recognition_exhausted:
                     await self._recognition_handoff()
@@ -522,7 +522,7 @@ class VoiceCall:
                 self.recognition_available = False
                 self.overlap = False
                 self.onset_sample = None
-                if not self.turn and (self.reply is None or self.reply.outcome is None):
+                if not self.turn and (self.reply is None or not self.reply.ends_call):
                     await self._stop()
                 if self.call.trace:
                     self.call.trace.add("speech_disconnected")
@@ -532,7 +532,7 @@ class VoiceCall:
                 self.recognition_exhausted = not self.recognition_available
                 if self.call.trace:
                     self.call.trace.add(event.kind)
-                if self.turn or (self.reply and self.reply.outcome):
+                if self.turn or (self.reply and self.reply.ends_call):
                     continue
                 if self.reply:
                     await self._stop()
@@ -589,14 +589,15 @@ class VoiceCall:
             if event.kind == "mark" and self.reply and event.text == self.reply.id:
                 self.call.playback_finished(event.text)
                 self.playback_end_sample = self.audio.end
-                outcome = self.reply.outcome
+                ended = self.reply.outcome if self.reply.ends_call else None
                 self.reply = None
-                if outcome:
-                    return outcome
+                if ended:
+                    # After a goodbye, report what the call achieved (e.g. "booked").
+                    return self.call.summary_outcome() or ended
             elif event.kind in {"interim", "final", "digit"}:
                 silence = 0
                 if self.reply:
-                    if self.reply.outcome:
+                    if self.reply.ends_call:
                         continue
                     heard = re.sub(r"[^\w ]", "", event.text.lower()).strip()
                     speaking = re.sub(r"[^\w ]", "", self.reply.text.lower())

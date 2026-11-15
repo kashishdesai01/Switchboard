@@ -150,7 +150,8 @@ function renderWork(data) {
 let externalTrace;
 function showTimeline() {
   const trace = snapshot.find((call) => call.id === selection) || (externalTrace?.id === selection ? externalTrace : null);
-  element("timeline-id").textContent = trace ? `Call ${trace.id.slice(0, 8)}` : "Select a call";
+  const outcomes = trace?.outcomes?.length ? ` · ${trace.outcomes.map(label).join(" → ")}` : "";
+  element("timeline-id").textContent = trace ? `Call ${trace.id.slice(0, 8)}${outcomes}` : "Select a call";
   element("mark-reviewed").hidden = !(trace && needsReview.has(trace.outcome) && !trace.reviewed_at);
   const rows = (trace?.events || []).map((entry) => {
     const row = document.createElement("li");

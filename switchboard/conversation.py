@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from switchboard.frontdesk import email_address
 from switchboard.intents import TurnInterpreter, TurnMeaning
+from switchboard.operations import summary_outcome
 from switchboard.safety import (
     ACUTE_REASONS,
     ACUTE_SCRIPTS,
@@ -132,6 +133,33 @@ TURN_ACTIONS = {
         "waitlist": "Caller asks to be added to the waitlist",
     },
 }
+TURN_ACTIONS["anything_else"] = {
+    **TURN_ACTIONS["intent"],
+    "done": "The caller has nothing else to ask and is ending the call",
+}
+# Outcomes that finish one task. The call goes on to "anything else?".
+# Every other outcome (emergency, handoff, needs_review, closed, goodbye) ends the call.
+TASK_OUTCOMES = frozenset(
+    {"info_only", "booked", "rescheduled", "cancelled", "declined", "waitlisted"}
+)
+ANYTHING_ELSE = " Is there anything else I can help with?"
+MAX_TASKS = 5
+# Work items that a later task must never replace.
+PRIORITY_WORK = frozenset({*ACUTE_REASONS.values(), "possible_emergency", "urgent_symptoms"})
+_FAREWELL = (
+    r"no|nope|nah|no thanks?|no thank you|thanks?|thank you|thanks so much|"
+    r"nothing(?: else)?|that's (?:all|it|everything)|that is (?:all|it|everything)|"
+    r"i'm (?:good|done|all set)|i am (?:good|done|all set)|all set|(?:good ?)?bye|"
+    r"have a (?:good|nice|great) (?:day|one)"
+)
+GOODBYE = re.compile(rf"(?:{_FAREWELL})(?: (?:{_FAREWELL}))*")
+
+
+def is_goodbye(text: str) -> bool:
+    words = " ".join(re.sub(r"[^\w' ]", " ", text.lower().replace("’", "'")).split())
+    return bool(words) and bool(GOODBYE.fullmatch(words))
+
+
 CONFIRMATION_STAGES = {
     "check_name",
     "check_dob",
@@ -175,6 +203,7 @@ class Reply:
     confirmation: bool = False
     calendar: tuple[dict, ...] = ()
     email_status: str | None = None
+    ends_call: bool = False
 
 
 class Call:
@@ -244,6 +273,12 @@ class Call:
         self.played = False
         self.history: deque[dict[str, str]] = deque(maxlen=6)
         self.last_reply: Reply | None = None
+        # A patient verified as the caller in an earlier task of this call.
+        self.known_patient: str | None = None
+        self.tasks = 0
+        self.task_work = False
+        # Each task's outcome in order, as the call's own record (a trace is optional).
+        self.outcomes: list[str] = []
 
     def greeting(self) -> Reply:
         return self.say(
@@ -260,19 +295,24 @@ class Call:
         calendar: tuple[dict, ...] = (),
         email_status: str | None = None,
     ) -> Reply:
-        reply = Reply(text, uuid4().hex, outcome, confirm, calendar, email_status)
+        ends_call = bool(outcome) and outcome not in TASK_OUTCOMES
+        if outcome in TASK_OUTCOMES:
+            text += ANYTHING_ELSE
+        reply = Reply(text, uuid4().hex, outcome, confirm, calendar, email_status, ends_call)
         self.last_reply = reply
         self.history.append({"assistant": text[:400]})
         if self.trace:
             self.trace.record("assistant", text)
         self.prompt_id, self.played = (reply.id if confirm else None), False
         if outcome:
-            if self.trace and (self.trace.outcome is None or outcome == "emergency"):
-                self.trace.outcome = outcome
+            if outcome not in {"goodbye", "closed"}:
+                self.outcomes.append(outcome)
+            if self.trace and outcome not in {"goodbye", "closed"}:
+                self.trace.add_outcome(outcome)
                 if (
                     self.frontdesk
                     and outcome in {"handoff", "needs_review", "emergency"}
-                    and not self.trace.work
+                    and not self.task_work
                 ):
                     reason = {
                         "handoff": "policy_review",
@@ -286,8 +326,17 @@ class Call:
                 and outcome in {"booked", "declined", "abandoned"}
             ):
                 self._work("staff_requested")
-            self.stage = "closed"
+            if ends_call:
+                self.stage = "closed"
+            else:
+                self.stage = "anything_else"
+                self.tasks += 1
+                self.task_work = False
         return reply
+
+    def summary_outcome(self) -> str | None:
+        """The call's outcome for transports: emergency or handoff first, else the last task."""
+        return summary_outcome(self.outcomes)
 
     def _work(self, reason: str, triaged: Triage | None = None) -> None:
         if self.trace and self.frontdesk:
@@ -309,7 +358,19 @@ class Call:
                     context["relation"] = self.party.relation
                 if self.party.name:
                     context["patient_name"] = self.party.name
-            self.trace.work = reason, context
+            item = reason, context
+            current = self.trace.work
+            if current is not None and not self.task_work:
+                # Work from an earlier task stays on record. Only emergency or urgent
+                # work takes the main slot from it, and nothing takes it from those.
+                if reason in PRIORITY_WORK and current[0] not in PRIORITY_WORK:
+                    self.trace.more_work.append(current)
+                    self.trace.work = item
+                else:
+                    self.trace.more_work.append(item)
+            else:
+                self.trace.work = item
+            self.task_work = True
 
     def _handoff(self, reason: str, message: str) -> Reply:
         self._work(reason)
@@ -418,7 +479,7 @@ class Call:
                         self.safety_retries = 0
                         # "No, it was in the past, I need to book a follow-up" carries a request.
                         if (
-                            self.stage == "intent"
+                            self.stage in {"intent", "anything_else"}
                             and lead.answer == "no"
                             and lead.rest
                             and request_route(lead.rest) != "unknown"
@@ -444,11 +505,40 @@ class Call:
                 ):
                     if not self.safety_resume:
                         self.safety_resume = self.last_reply or self.greeting()
-                        if self.stage == "intent":
+                        if self.stage in {"intent", "anything_else"}:
                             self.safety_opening = text
                     return self.say(
                         "Is this happening right now? If it is an emergency, call 911 now."
                     )
+                if self.stage == "anything_else":
+                    lead = leading_answer(text)
+                    if (
+                        is_goodbye(text)
+                        or (lead.answer == "no" and (not lead.rest or is_goodbye(lead.rest)))
+                        or (
+                            meaning
+                            and meaning.action == "done"
+                            and request_route(words) == "unknown"
+                            and not is_booking_request(words)
+                        )
+                    ):
+                        return self.say("Thanks for calling. Goodbye.", outcome="goodbye")
+                    if lead.answer == "yes" and not lead.rest:
+                        return self.say("What else can I help with?")
+                    if lead.answer and lead.rest:
+                        # "No, but can I also..." or "Yes, I need to cancel": the rest is the request.
+                        text = lead.rest
+                        words = " ".join(
+                            text.lower().replace(",", " ").replace("’", "'").strip(".!? ").split()
+                        )
+                    await self._new_task()
+                    if self.tasks >= MAX_TASKS:
+                        self.staff_topic = "additional requests"
+                        return self._handoff(
+                            "staff_requested",
+                            "I've helped with several requests on this call. "
+                            "I'll pass you to the front desk for anything else.",
+                        )
                 staff = STAFF_TOPIC.search(words)
                 proxy = proxy_request(words)
                 book_request = is_booking_request(words)
@@ -803,9 +893,9 @@ class Call:
                 )
                 if self.provider or answer == "yes" or words in {"anyone", "another doctor"}:
                     self._set_window(words)
-                    return self._ask_name()
+                    return await self._identify()
                 if answer == "no":
-                    return self.say("Of course. Thanks for calling.", outcome="declined")
+                    return self.say("Of course. I haven't booked anything.", outcome="declined")
                 return self.say("Would you like to hear times with another doctor here?")
             case "name":
                 if (
@@ -1042,7 +1132,7 @@ class Call:
                 and not re.search(r"\b(accept|take)\b", words)
             ):
                 self.intent = "coverage"
-                return self._ask_name()
+                return await self._identify()
         intent = (
             self.intent
             if patient_confirmed
@@ -1144,10 +1234,57 @@ class Call:
                 f"Dr. {requested.title()} isn't on the schedule for "
                 f"{self.scheduling.clinic.name}. Would you like to hear times with another doctor here?"
             )
-        if identity and not self.party.proxy:
+        if identity and not self.party.proxy and not self.known_patient:
             self.stage = "name"
             return self._capture_name(text[identity_start:])
+        return await self._identify()
+
+    async def _identify(self) -> Reply:
+        """Ask who the patient is, unless the caller already verified as the patient."""
+        if self.known_patient and not self.party.proxy:
+            self.party.patient = "self"
+            self.patient = self.known_patient
+            self.name, self.dob = "", None
+            return await self._after_verify()
         return self._ask_name()
+
+    async def _new_task(self) -> None:
+        """Clear per-task state before the caller's next request.
+
+        The verified patient carries over only when the caller was the patient.
+        Requests for someone else always verify again.
+        """
+        await self.close()
+        if self.party.proxy or self.new_patient:
+            known = None
+        elif self.patient:
+            known = self.patient if self.party.patient == "self" else None
+        else:
+            known = self.known_patient
+        self.known_patient = known
+        if not known:
+            self.email_on_file, self.email_checked = None, False
+        self.patient = None
+        self.party = Party()
+        self.stage = "intent"
+        self.intent = "book"
+        self.visit = "follow-up"
+        self.day = self.week = self.period = None
+        self.days = ()
+        self.requested_time = self.after = self.before = None
+        self.location = self.service = self.provider = None
+        self.options, self.existing_options, self.shown_slots = [], [], set()
+        self.old = None
+        self.pending_email = self.staff_topic = None
+        self.pending_request = None
+        self.unclear = self.opening_interpreter_failures = 0
+        self.safety_resume, self.safety_opening, self.safety_retries = None, None, 0
+        self.name, self.dob, self.dob_fragment = "", None, None
+        self.dob_retries = self.identity_playback_retries = self.attempts = 0
+        self.new_patient = None
+        self.digits = ""
+        self.last_operation = None
+        self.task_work = False
 
     @staticmethod
     def _identity_details(text: str) -> re.Match | None:
@@ -1498,6 +1635,9 @@ class Call:
                 if self.party.proxy
                 else "I couldn't verify those details. Please repeat your full name."
             )
+        return await self._after_verify()
+
+    async def _after_verify(self) -> Reply:
         if self.intent == "book":
             return await self._offer()
         if self.intent == "coverage":

@@ -39,14 +39,15 @@ def test_playback_deadline_accounts_for_audio_length(tmp_path, monkeypatch):
         call = Call(Scheduling(DemoStore(tmp_path / "voice.sqlite"), BAYVIEW))
         media = FakeMedia()
         voice = VoiceCall(call, media, LongerTts())
-        await voice._play(call.say("Two detailed appointment options.", outcome="info_only"))
+        # A reply that ends the call: the loop returns once its playback is acknowledged.
+        await voice._play(call.say("Two detailed appointment options.", outcome="handoff"))
         async with asyncio.timeout(2):
             loop = asyncio.create_task(voice._loop())
             assert (await media.outbound.get())[0] == "audio"
             _, mark = await media.outbound.get()
             await asyncio.sleep(0.12)
             await voice.events.put(Speech("mark", mark))
-            assert await loop == "info_only"
+            assert await loop == "handoff"
 
     asyncio.run(run())
 
@@ -94,6 +95,11 @@ def test_twilio_clear_mark_cannot_authorize_and_late_vad_is_unsafe(tmp_path):
             assert (await media.outbound.get())[0] == "audio"
             _, terminal_mark = await media.outbound.get()
             await voice.events.put(Speech("mark", terminal_mark))
+            # A booking finishes the task; the caller ends the call.
+            await voice.events.put(Speech("final", "no thanks"))
+            assert (await media.outbound.get())[0] == "audio"
+            _, goodbye_mark = await media.outbound.get()
+            await voice.events.put(Speech("mark", goodbye_mark))
             assert await loop == "booked"
             assert len(await store.search("Appointment")) == 1
 
@@ -219,6 +225,10 @@ def test_speech_drop_requires_a_fresh_readback(tmp_path):
             assert (await media.outbound.get())[0] == "audio"
             _, terminal = await media.outbound.get()
             await voice.events.put(Speech("mark", terminal))
+            await voice.events.put(Speech("final", "no thanks"))
+            assert (await media.outbound.get())[0] == "audio"
+            _, goodbye = await media.outbound.get()
+            await voice.events.put(Speech("mark", goodbye))
             assert await loop == "booked"
             assert len(await store.search("Appointment")) == 1
 
