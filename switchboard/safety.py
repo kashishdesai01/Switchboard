@@ -1,7 +1,15 @@
-"""Deterministic emergency floor for the synthetic US clinic."""
+"""Deterministic safety floor for the synthetic US clinic.
+
+Symptom phrases live in ``safety_terms.toml`` (a draft for clinician review).
+This module keeps the clause, negation, history, follow-up and hypothetical
+logic, and ranks what it finds into triage levels.
+"""
 
 import re
+import tomllib
+from dataclasses import dataclass
 from enum import Enum, auto
+from pathlib import Path
 
 EMERGENCY_SCRIPT = "If this is a medical emergency, hang up and call 911 now."
 
@@ -10,41 +18,21 @@ EMERGENCY_SCRIPT = "If this is a medical emergency, hang up and call 911 now."
 CLAUSES = re.compile(
     r"[.!?;]+|,\s*(?=(?:now|today|can|could|would|i|he|she|they|we|my|his|her)\b)"
     r"|\b(?:but|however|except|although|whereas)\b"
+    r"|\b(?:no|nope|yes|yeah|yep|okay|ok)\s+(?=(?:i|i'm|he|he's|she|she's|they|we|my|his|her|it)\b)"
     r"|\band\s+(?=(?:(?:right now|now|today)\s+)?(?:i|he|she|they|we|my|his|her|"
     r"started|developed|is|are|just|still|now)\b)"
 )
-SIGNS = re.compile(
-    r"\b(?:heart attack|cardiac arrest|stroke\b(?!\s+(?:of|prevention|rehab|rehabilitation|screening|education)\b)|chest (?:pain|pressure|tightness)"
-    r"|(?:pain|pressure|tightness) in (?:my|his|her|their|the) chest"
-    r"|(?:can(?:not|'t)|could(?: not|n't)|won't|doesn't|does not) (?:breathe|catch (?:my|his|her|their) breath|wake up)"
-    r"|(?:not|stopped|stop) breathing|(?:struggling|hard|unable) to breathe"
-    r"|(?:trouble|difficulty|(?:hard|difficult) time) (?:with )?breathing|short(?:ness)? of breath"
-    r"|gasping for (?:air|breath)|(?:can't|cannot) get enough air|(?:barely|hardly) breath(?:e|ing)|choking|turned blue|blue lips"
-    r"|pass(?:ed|ing|es)? out|fainted|collapsed|unconscious|unresponsive"
-    r"|(?:can't|cannot|won't) (?:get|bring) (?:him|her|them) (?:to wake up|around)"
-    r"|(?:isn't|aren't|not) (?:waking up|responding)(?! (?:to (?:my |the )?(?:emails?|messages?|texts?)|by (?:email|text)))"
-    r"|(?:heavy|severe|uncontrolled) bleeding"
-    r"|bleed(?:ing|s)? (?:a lot|heavily|profusely|through)|bleeding (?:won't|will not) stop"
-    r"|(?:can't|cannot) stop (?:the )?bleeding|(?:throwing up|vomiting|coughing up) blood"
-    r"|seizures?|convuls(?:ing|ions)|overdos\w*|too many pills"
-    r"|anaphylax\w*|(?:tongue|throat) (?:is )?swelling|throat (?:is )?closing"
-    r"|suicid\w*|(?:hurt|kill)(?:ing)? myself|end(?:ing)? my life"
-    r"|(?:face|mouth) (?:is |has been |just started )?droop\w*|slurr(?:ed|ing) (?:speech|words)"
-    r"|(?:speech|words) (?:is |are |sound(?:s)? )?(?:slurred|garbled)"
-    r"|(?:sudden(?:ly)?|one.sided) (?:\w+ ){0,4}(?:numb(?:ness)?|weakness)"
-    r"|(?:one side|(?:left|right|one) (?:arm|side of (?:my|his|her|the) face))"
-    r" (?:is |went |feels? |just )*(?:numb|weak)"
-    r")\b"
-)
 HISTORICAL = re.compile(
     r"\b(?:family history|medical history|history of|used to|in the past|previously|"
+    r"died (?:of|from)|passed away (?:of|from)|"
     r"last (?:week|month|year|winter|spring|summer|fall|autumn)|(?:a |one )?(?:week|month|year) and a half ago|(?:weeks?|months?|years?) ago|as a child|in (?:19|20)\d\d)\b"
 )
 CURRENT = re.compile(
     r"\b(?:now|today|just|currently|still|again|tonight|this morning|minutes? ago|hours? ago|yesterday)\b"
 )
 NON_EVENT = re.compile(
-    r"\b(?:what (?:is|are) (?:the )?(?:signs|symptoms)|(?:learn|read|ask) about (?:the )?(?:signs|symptoms)|"
+    r"\b(?:what (?:is|are) (?:the )?(?:\w+ )?(?:signs|symptoms)|what happens if|"
+    r"how (?:do|can|would) (?:i|you) (?:know|tell) if|(?:learn|read|ask) about (?:the )?(?:signs|symptoms)|"
     r"screening for|(?:risk|prevention) of|fear of|education about|hypothetically|"
     r"if (?:someone|a person))\b"
 )
@@ -86,11 +74,8 @@ class SafetySignal(Enum):
     ACUTE = auto()
 
 
-CONDITION_LABEL = re.compile(
-    r"(?:stroke|heart attack|cardiac arrest|seizures?|overdos\w*|anaphylax\w*)"
-)
 ACUTE_ASSERTION = re.compile(
-    r"\b(?:having|experiencing|showing signs of|(?:think|suspect) (?:it is|this is|it's))"
+    r"\b(?:having|experiencing|going into|showing signs of|(?:think|suspect) (?:it is|this is|it's))"
     r"\s+(?:(?:a|an|another|the)\s+)?$"
 )
 RECENT_EVENT = re.compile(
@@ -98,14 +83,141 @@ RECENT_EVENT = re.compile(
     r"(?:[\w-]+ ){1,3}(?:minutes?|hours?) ago)\b"
 )
 RECENT_ASSERTION = re.compile(
-    r"\bjust (?:had|suffered|experienced)\s+(?:(?:a|an|another|the)\s+)?$"
+    r"\bjust (?:had|suffered|experienced|been in|got in(?:to)?|in)\s+(?:(?:a|an|another|the)\s+)?$"
 )
 POSSIBLE_CURRENT_EVENT = re.compile(r"\bif this is (?:a|an)\s+$")
 
 
-def safety_signal(text: str) -> SafetySignal:
-    text = text.casefold().replace("’", "'")
-    signal = SafetySignal.NONE
+class Level(Enum):
+    """Triage levels, from no concern up to a 911 emergency."""
+
+    NONE = "NONE"
+    AMBIGUOUS = "AMBIGUOUS"
+    URGENT = "URGENT"
+    POISONING = "POISONING"
+    CRISIS = "CRISIS"
+    EMERGENCY = "EMERGENCY"
+
+    @property
+    def rank(self) -> int:
+        """Severity order. Crisis and poisoning rank together."""
+        return _RANK[self]
+
+    @property
+    def acute(self) -> bool:
+        return self in {Level.EMERGENCY, Level.CRISIS, Level.POISONING}
+
+
+_RANK = {
+    Level.NONE: 0,
+    Level.AMBIGUOUS: 1,
+    Level.URGENT: 2,
+    Level.POISONING: 3,
+    Level.CRISIS: 3,
+    Level.EMERGENCY: 4,
+}
+
+
+@dataclass(frozen=True)
+class Triage:
+    """The most severe level found, its category, and every category reported."""
+
+    level: Level
+    category: str | None = None
+    categories: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Category:
+    name: str
+    level: Level
+    signs: re.Pattern[str]
+    context: re.Pattern[str] | None
+
+
+TERMS_PATH = Path(__file__).with_name("safety_terms.toml")
+
+
+def _alternation(fragments: list[str]) -> str:
+    return "|".join(f"(?:{fragment})" for fragment in fragments)
+
+
+def _load_terms(path: Path) -> tuple[tuple[Category, ...], re.Pattern[str]]:
+    with path.open("rb") as file:
+        data = tomllib.load(file)
+    categories = []
+    conditions = []
+    for name, entry in data["categories"].items():
+        level = Level(entry["level"])
+        if level in {Level.NONE, Level.AMBIGUOUS}:
+            raise ValueError(f"safety category {name} needs an actionable level")
+        names = entry.get("conditions", [])
+        conditions.extend(names)
+        fragments = names + entry.get("patterns", [])
+        context = entry.get("context")
+        categories.append(
+            Category(
+                name,
+                level,
+                re.compile(rf"\b(?:{_alternation(fragments)})\b"),
+                re.compile(rf"\b(?:{_alternation(context)})") if context else None,
+            )
+        )
+    return tuple(categories), re.compile(_alternation(conditions))
+
+
+CATEGORIES, CONDITION_LABEL = _load_terms(TERMS_PATH)
+
+# Speech recognition drops apostrophes. Restore the contractions the patterns use.
+ASR_CONTRACTIONS = {
+    "cant": "can't",
+    "wont": "won't",
+    "dont": "don't",
+    "doesnt": "doesn't",
+    "didnt": "didn't",
+    "isnt": "isn't",
+    "arent": "aren't",
+    "wasnt": "wasn't",
+    "werent": "weren't",
+    "couldnt": "couldn't",
+    "wouldnt": "wouldn't",
+    "hasnt": "hasn't",
+    "havent": "haven't",
+    "im": "i'm",
+    "ive": "i've",
+    "hes": "he's",
+    "shes": "she's",
+    "theyre": "they're",
+    "elses": "else's",
+    "wanna": "want to",
+    "gonna": "going to",
+    "can not": "cannot",
+}
+ASR_WORDS = re.compile(r"\b(?:" + "|".join(map(re.escape, ASR_CONTRACTIONS)) + r")\b")
+
+
+def normalize(text: str) -> str:
+    text = " ".join(text.casefold().replace("’", "'").replace("‘", "'").split())
+    return ASR_WORDS.sub(lambda match: ASR_CONTRACTIONS[match[0]], text)
+
+
+def _sign_matches(clause: str, text: str) -> list[tuple[re.Match[str], Category]]:
+    found = []
+    for category in CATEGORIES:
+        if category.context is not None and not category.context.search(text):
+            continue
+        found.extend((match, category) for match in category.signs.finditer(clause))
+    # Leftmost first; at one position the most severe reading comes first.
+    found.sort(key=lambda item: (item[0].start(), -item[1].level.rank, -item[0].end()))
+    return found
+
+
+def _assess(text: str) -> tuple[Triage, bool]:
+    """Return the triage result and whether an unasserted diagnosis was named."""
+    text = normalize(text)
+    ambiguous = False
+    best: tuple[Level, str] | None = None
+    reported: list[str] = []
     follow_up_request = bool(FOLLOW_UP_MENTION.search(text))
     for clause in CLAUSES.split(text):
         # With an explicit current cue, err toward routing recent or ongoing signs.
@@ -123,7 +235,7 @@ def safety_signal(text: str) -> SafetySignal:
         follow_up = FOLLOW_UP.search(clause)
         previous_end = 0
         negated = False
-        for match in SIGNS.finditer(clause):
+        for match, category in _sign_matches(clause, text):
             context = clause[previous_end : match.start()]
             negation = list(NEGATED.finditer(context))
             if negation:
@@ -153,10 +265,35 @@ def safety_signal(text: str) -> SafetySignal:
                     or RECENT_EVENT.match(suffix)
                     or POSSIBLE_CURRENT_EVENT.search(prefix)
                 ):
-                    return SafetySignal.ACUTE
-                signal = SafetySignal.AMBIGUOUS
-            previous_end = match.end()
-    return signal
+                    if category.name not in reported:
+                        reported.append(category.name)
+                    if best is None or category.level.rank > best[0].rank:
+                        best = (category.level, category.name)
+                else:
+                    ambiguous = True
+            previous_end = max(previous_end, match.end())
+    if best is not None:
+        return Triage(best[0], best[1], tuple(reported)), ambiguous
+    if ambiguous:
+        return Triage(Level.AMBIGUOUS), True
+    return Triage(Level.NONE), False
+
+
+def triage(text: str) -> Triage:
+    """Rank a caller's words: EMERGENCY, CRISIS, POISONING, URGENT, AMBIGUOUS or NONE."""
+    return _assess(text)[0]
+
+
+def safety_signal(text: str) -> SafetySignal:
+    """The routing signal for existing callers.
+
+    Emergency, crisis and poisoning are ACUTE. Urgent is not routed here yet,
+    so it reads as NONE unless a diagnosis also needs clarifying.
+    """
+    result, ambiguous = _assess(text)
+    if result.level.acute:
+        return SafetySignal.ACUTE
+    return SafetySignal.AMBIGUOUS if ambiguous else SafetySignal.NONE
 
 
 def condition_only(text: str) -> bool:

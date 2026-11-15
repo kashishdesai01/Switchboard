@@ -1,12 +1,14 @@
 import asyncio
+import tomllib
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
 from switchboard.config import BAYVIEW
 from switchboard.conversation import Call
 from switchboard.intents import TurnMeaning
-from switchboard.safety import SafetySignal, safety_signal
+from switchboard.safety import Level, SafetySignal, safety_signal, triage
 from switchboard.scheduling import Scheduling
 from switchboard.store import DemoStore
 
@@ -189,3 +191,86 @@ def test_historical_clarification_resumes_the_original_booking(tmp_path):
         assert call.week is not None
 
     asyncio.run(run())
+
+
+# Labelled safety set: tests/safety_cases.toml (draft for clinician review).
+
+SAFETY_CASES = tomllib.loads(
+    (Path(__file__).with_name("safety_cases.toml")).read_text(encoding="utf-8")
+)["cases"]
+MUST_CATCH_LEVELS = {Level.EMERGENCY, Level.CRISIS, Level.POISONING}
+
+
+def caught(expected: Level, actual: Level) -> bool:
+    """A must-catch case passes at its level or a more severe one. Crisis must stay crisis."""
+    if expected is Level.CRISIS:
+        return actual is Level.CRISIS
+    return actual.rank >= expected.rank
+
+
+def test_safety_set_is_well_formed():
+    assert len(SAFETY_CASES) >= 200
+    texts = [case["text"] for case in SAFETY_CASES]
+    assert len(texts) == len(set(texts)), "duplicate safety cases"
+    for case in SAFETY_CASES:
+        level = Level(case["level"])
+        assert case.get("must_catch", False) is (level in MUST_CATCH_LEVELS), case
+    levels = {Level(case["level"]) for case in SAFETY_CASES}
+    assert levels == set(Level)
+
+
+def test_safety_set_catches_every_must_catch_case():
+    cases = [case for case in SAFETY_CASES if case.get("must_catch")]
+    misses = []
+    for case in cases:
+        expected, actual = Level(case["level"]), triage(case["text"])
+        if not caught(expected, actual.level):
+            misses.append(f"{case['text']!r}: expected {expected.value}, got {actual.level.value}")
+    assert not misses, f"{len(misses)}/{len(cases)} must-catch cases missed:\n" + "\n".join(misses)
+
+
+def test_safety_set_routes_must_catch_cases_to_the_emergency_reply():
+    misses = [
+        case["text"]
+        for case in SAFETY_CASES
+        if case.get("must_catch") and safety_signal(case["text"]) is not SafetySignal.ACUTE
+    ]
+    assert not misses, "not routed as ACUTE:\n" + "\n".join(misses)
+
+
+def test_safety_set_raises_no_alarm_on_routine_requests():
+    cases = [case for case in SAFETY_CASES if case["level"] == "NONE"]
+    alarms = []
+    questions = 0
+    for case in cases:
+        actual = triage(case["text"]).level
+        if actual is Level.AMBIGUOUS:
+            questions += 1
+        elif actual is not Level.NONE:
+            alarms.append(f"{case['text']!r}: got {actual.value}")
+    print(f"NONE cases: {len(cases)}, clarifying questions: {questions}, alarms: {len(alarms)}")
+    assert not alarms, f"{len(alarms)}/{len(cases)} false alarms:\n" + "\n".join(alarms)
+
+
+def test_safety_set_matches_the_remaining_levels_exactly():
+    cases = [
+        case for case in SAFETY_CASES if not case.get("must_catch") and case["level"] != "NONE"
+    ]
+    misses = []
+    for case in cases:
+        actual = triage(case["text"]).level
+        if actual.value != case["level"]:
+            misses.append(f"{case['text']!r}: expected {case['level']}, got {actual.value}")
+    assert not misses, f"{len(misses)}/{len(cases)} mismatches:\n" + "\n".join(misses)
+
+
+def test_urgent_is_not_routed_as_an_emergency_yet():
+    assert triage("I fell and can't put weight on my leg").level is Level.URGENT
+    assert safety_signal("I fell and can't put weight on my leg") is SafetySignal.NONE
+
+
+def test_triage_reports_category_and_every_category_found():
+    result = triage("my son swallowed bleach and now he can't breathe")
+    assert (result.level, result.category) == (Level.EMERGENCY, "breathing")
+    assert set(result.categories) == {"poisoning", "breathing"}
+    assert triage("I don't want to live anymore").category == "suicide_self_harm"

@@ -1,0 +1,287 @@
+# DRAFT FOR CLINICIAN REVIEW. Not clinically validated.
+#
+# Symptom phrases for the deterministic safety floor in switchboard/safety.py.
+# Tuned for recall: a missed emergency costs far more than a false alarm.
+# Text is case-folded and speech-recognition contractions are restored
+# ("cant" -> "can't", "hes" -> "he's") before matching. Clause splitting,
+# negation, history, follow-up and hypothetical handling stay in Python.
+#
+# Each category has:
+#   level       EMERGENCY (911), CRISIS (988), POISONING (Poison Control,
+#               911 if symptomatic) or URGENT (same day / nurse line).
+#   patterns    regex fragments (use only non-capturing groups). A match is
+#               an acute report unless negated, historical or hypothetical.
+#   conditions  diagnosis names ("stroke"). Alone they are AMBIGUOUS and need
+#               a current assertion ("having a stroke", "just had a stroke").
+#   context     optional. The match only counts when one of these also
+#               appears somewhere in the caller's text (e.g. a cast or injury).
+#
+# Categories are listed from most to least severe within each level.
+
+# EMERGENCY: call 911
+
+[categories.cardiac]
+level = "EMERGENCY"
+conditions = ['heart attack', 'cardiac arrest']
+patterns = [
+    'chest (?:pain|pressure|tightness)',
+    "(?:pain|pressure|tightness) in (?:my|his|her|their|the) chest",
+    "chest (?:is |keeps )?(?:hurts?|hurting|feels? (?:tight|heavy|crushed))",
+    "heart (?:has )?(?:stopped|isn't beating|is not beating)",
+]
+
+[categories.breathing]
+level = "EMERGENCY"
+patterns = [
+    "(?:can(?:not|'t)|could(?: not|n't)|won't|doesn't|does not) (?:breathe|catch (?:my|his|her|their) breath)",
+    "(?:not|stopped|stop) breathing",
+    "(?:isn't|is not|aren't|are not|wasn't|was not) breathing",
+    "(?:struggling|hard|unable) to breathe",
+    "(?:trouble|difficulty|(?:hard|difficult) time) (?:with )?breathing",
+    "short(?:ness)? of breath",
+    "gasping for (?:air|breath)",
+    "(?:can't|cannot) get enough air",
+    "(?:barely|hardly) breath(?:e|ing)",
+    "choking",
+    "(?:turned|turning|going|gone) blue",
+    "blue lips",
+    "lips (?:are |is |look |looks )?(?:turning |going )?blue",
+]
+
+[categories.unconscious]
+level = "EMERGENCY"
+patterns = [
+    "(?:can(?:not|'t)|could(?: not|n't)|won't|doesn't|does not) wake up",
+    "pass(?:ed|ing|es)? out",
+    "fainted",
+    "collapsed",
+    "unconscious",
+    "unresponsive",
+    "blacked out",
+    "knocked (?:out|unconscious)",
+    "(?:can't|cannot|won't) (?:get|bring) (?:him|her|them) (?:to wake up|around)",
+    "(?:isn't|aren't|not) (?:waking up|responding)(?! (?:to (?:my |the )?(?:emails?|messages?|texts?)|by (?:email|text)))",
+]
+
+[categories.bleeding]
+level = "EMERGENCY"
+patterns = [
+    "(?:heavy|severe|uncontrolled) bleeding",
+    "bleed(?:ing|s)? (?:a lot|heavily|profusely|through|everywhere)",
+    "bleeding (?:won't|will not) stop",
+    "(?:can't|cannot|won't|will not) stop (?:the )?bleeding",
+    "(?:throwing up|vomiting|coughing up) blood",
+    "blood (?:everywhere|is (?:pouring|gushing|spurting))",
+]
+
+[categories.seizure]
+level = "EMERGENCY"
+conditions = ['seizures?']
+patterns = ['convuls(?:ing|ions?)', 'seizing']
+
+[categories.stroke]
+level = "EMERGENCY"
+conditions = ['stroke\b(?!\s+(?:of|prevention|rehab|rehabilitation|screening|education)\b)']
+patterns = [
+    "(?:face|mouth) (?:is |has been |just started )?droop\\w*",
+    "slurr(?:ed|ing) (?:speech|words)",
+    "slurring (?:his |her |my |their )?(?:words|speech)",
+    "(?:speech|words) (?:is |are |sound(?:s)? )?(?:slurred|garbled)",
+    "(?:sudden(?:ly)?|one.sided) (?:\\w+ ){0,4}(?:numb(?:ness)?|weakness)",
+    "(?:one side|(?:left|right|one) (?:arm|side of (?:my|his|her|the) face)) (?:is |went |feels? |just )*(?:numb|weak)",
+]
+
+[categories.anaphylaxis]
+level = "EMERGENCY"
+conditions = ['anaphylax\w*', '(?:severe )?allergic reaction']
+patterns = [
+    "(?:face|lips?|tongue|throat|mouth) (?:is |are |has |have |keeps? |just |started |starting |getting |been |all )*(?:swelling|swollen|swelled|puff(?:ing|ed) up|blowing up)",
+    "swelling (?:in|of) (?:my|his|her|their|the) (?:face|lips?|tongue|throat|mouth)",
+    "swollen (?:face|lips?|tongue|throat)",
+    "(?:can(?:not|'t)|could(?: not|n't)|unable to|struggling to|hard to) swallow",
+    "(?:trouble|difficulty|(?:hard|difficult) time|problems?) (?:with )?swallowing",
+    "throat (?:is |feels? |feeling |getting |keeps |has |been |so |really |very )*(?:tight|tightening|closing|closed)",
+    "tight(?:ness)? in (?:my|his|her|their|the) throat",
+    "airway (?:is )?(?:closing|swelling|blocked)",
+    "(?:face|lips?|tongue|mouth) (?:is |are |getting |got |went |looks? |so |really |very |all )*(?:big and |huge and |swollen and )?(?:puffy|puffed|huge|fat)",
+]
+
+[categories.overdose]
+level = "EMERGENCY"
+conditions = ['overdoses?']
+patterns = [
+    'too many pills',
+    'overdos(?:ing|ed)',
+    "(?:took|take|taken|swallowed|ate|downed) (?:a |the )?(?:whole|full|entire) (?:bottle|pack|packet|box) of",
+    "(?:took|take|taken|swallowed|ate|downed) (?:all|a bunch|a handful|a lot|handfuls|a ton|most) of (?:my |his |her |their |the )?(?:\\w+ ){0,2}?(?:pills|meds|medications?|medicine|tablets|tylenol|advil|sleeping pills|painkillers|pain pills|oxy\\w*)",
+]
+
+[categories.open_fracture]
+level = "EMERGENCY"
+patterns = [
+    "bones? (?:is |are |was )?(?:sticking|poking|coming|protruding|popping|pushing) (?:out|through)",
+    "bones? (?:\\w+ ){0,2}through (?:the|his|her|my|their) skin",
+    "(?:see|seeing|can see) (?:the |his |her |my )?bone",
+    "bones? (?:is |are )?(?:showing|visible|exposed)",
+    "(?:has|have|got|with) (?:an? )?(?:open|compound) fracture",
+    "(?:bent|twisted|pointing|facing|turned) (?:the )?wrong way",
+    "(?:looks|is|it's) (?:all )?(?:deformed|crooked|out of place)",
+]
+
+[categories.limb_circulation]
+level = "EMERGENCY"
+patterns = [
+    "(?:fingers?|toes?|hands?|foot|feet|arms?|legs?|ankles?|wrists?) (?:is |are |feel |feels |look |looks |turned |turning |went |gone |going |has |have |getting |got |become |became |been |all |so |really |very |kind of |ice )*(?:cold|pale|white|blue|purple|gr[ae]y|numb|tingl\\w*)",
+    "(?:can(?:not|'t)|could(?: not|n't)|unable to) (?:move|wiggle|feel) (?:my|his|her|their|the) (?:fingers?|toes?|hands?|foot|feet|arms?|legs?)",
+    "no feeling in (?:my|his|her|their|the) (?:fingers?|toes?|hands?|foot|feet|arms?|legs?)",
+]
+context = [
+    '\bcast\b', 'splint', 'injur\w*', '\bbr(?:oke|oken)\b', 'fractur\w*',
+    '\bfell (?:down|off|on|over|from|out|and)\b', "\\bfall(?:en)?\\b(?! asleep)", 'crash\w*', 'accident',
+    'twist\w*', 'sprain\w*', 'crush\w*', 'dislocat\w*', 'hit by', 'slammed',
+]
+
+[categories.cast_pain]
+level = "EMERGENCY"
+patterns = [
+    "(?:pain|hurts?|hurting|throbbing)(?:\\s+\\S+){0,8}?\\s+(?:keeps? getting|getting|gets|got|has gotten|growing|keeps? growing) (?:much |a lot |even |way )?worse",
+    "(?:severe|unbearable|excruciating|terrible|horrible|intense|extreme|worst) pain",
+    "pain(?:\\s+\\S+){0,5}?\\s+(?:is |feels |getting )?(?:unbearable|excruciating|out of control|through the roof)",
+    "(?:hurts?|hurting|pain) (?:so|really|very|too) (?:much|bad(?:ly)?)",
+    "(?:pain )?(?:meds|medicine|medication|painkillers|pain pills) (?:aren't|are not|isn't|is not|don't|do not|doesn't|does not) (?:help|helping|work|working|touching)",
+]
+context = ['\bcast\b', 'splint']
+
+[categories.cauda_equina]
+level = "EMERGENCY"
+patterns = [
+    "(?:(?:lost|losing|loss of|lose|no|can't|cannot) control (?:of|over)|(?:can't|cannot|couldn't) control|lost|losing|loss of) (?:my |his |her |their )?(?:bladder|bowels?)",
+    "(?:numb(?:ness)?|no feeling|tingl\\w*) (?:in|around|between) (?:my |his |her |their |the )?(?:groin|saddle|genitals|private (?:area|parts)|inner thighs|buttocks|bottom|crotch)",
+    "(?:groin|saddle area|saddle region|crotch|private area|inner thighs) (?:is |are |feels? |went |has gone |gone )*numb",
+    "saddle (?:numbness|anesthesia)",
+    "(?:can't|cannot|unable to|could not|couldn't) (?:pee|urinate)",
+]
+
+[categories.head_injury]
+level = "EMERGENCY"
+patterns = [
+    "confus\\w*",
+    "disoriented",
+    "not making sense",
+    "(?:doesn't|does not|don't|didn't) know where (?:he|she|i|they) (?:is|am|are|was)",
+    "(?:keeps?|kept|won't stop|has been|have been|is|been) (?:throwing up|vomiting|puking)",
+    "(?:throwing up|vomiting|threw up|vomited|puked) (?:\\w+ ){0,2}(?:again|repeatedly|over and over|several times|multiple times|twice|three times|a lot)",
+]
+context = [
+    "(?:hit(?:ting)?|bump(?:ed|ing)?|hurt(?:ing)?|injur\\w*|bang(?:ed|ing)?|struck|smack(?:ed|ing)?|knock(?:ed|ing)?)\\s+(?:\\w+\\s+){0,2}head",
+    'head (?:injury|trauma|wound)', 'concuss\w*',
+    "(?:fell|landed) (?:\\w+ ){0,3}(?:on|onto) (?:my|his|her|their|the) head",
+]
+
+[categories.major_trauma]
+level = "EMERGENCY"
+conditions = ['(?:car|auto|motorcycle|bike|bicycle|traffic) (?:accident|crash|wreck)']
+patterns = [
+    "(?:hit|struck|run over) by (?:a |the )?(?:car|truck|bus|vehicle|van|motorcycle)",
+    "(?:fell|fall|fallen|falling) (?:off|from|out of) (?:a |the |his |her |my |our )?(?:roof|ladder|balcony|building|height|window|second (?:story|floor)|tree|stairs|scaffold\\w*|cliff)",
+    "fall from (?:a )?height",
+    "(?:car|truck|motorcycle) (?:crashed|flipped|rolled)",
+]
+
+# CRISIS: suicide or self-harm, 988 Suicide and Crisis Lifeline
+
+[categories.suicide_self_harm]
+level = "CRISIS"
+patterns = [
+    "suicid\\w*",
+    "self[- ]?harm\\w*",
+    "(?:want|wants|wanted|wanting|going|gonna|plan|plans|planning|planned|thinking about|thought about|thinks about|trying|tried|try|urge|need|ready) to (?:die|kill (?:my|him|her|them)sel(?:f|ves)|end (?:it all|it|my life|his life|her life|their life|things|everything)|hurt (?:my|him|her|them)sel(?:f|ves)|harm (?:my|him|her|them)sel(?:f|ves)|cut (?:my|him|her|them)sel(?:f|ves))",
+    "(?:don't|doesn't|do not|does not|no longer|never) (?:want|wants) to (?:live|be alive|be here|exist|wake up|go on)",
+    "(?:don't|doesn't|do not|does not) (?:want|wants) to be alive",
+    "better off dead",
+    "better off without (?:me|him|her|them)",
+    "(?:no|nothing to) (?:reason to )?live for",
+    "no reason to (?:live|go on|be alive|keep going)",
+    "(?:can't|cannot) go on",
+    "end it all",
+    "end(?:ing)? (?:my|his|her|their) (?:own )?life",
+    "take (?:my|his|her|their) (?:own )?life",
+    "kill(?:ing)? (?:my|him|her|them)sel(?:f|ves)",
+    "(?:been|keep|keeps|am|is|i'm|he's|she's|started|start) (?:hurting|cutting|harming|burning) (?:my|him|her|them)sel(?:f|ves)",
+    "cutting (?:my|him|her|them)sel(?:f|ves)",
+    "wish(?:es|ed)? (?:i|he|she|they) (?:was|were) dead",
+    "(?:life|living) (?:is not|isn't|is no longer) worth (?:living|it)",
+    "not worth living",
+    "want(?:s)? (?:it all|everything) to (?:be over|end|stop)(?: for good| forever)?",
+    "wish (?:i|he|she|they) (?:could just )?(?:disappear|wasn't here|weren't here|wasn't alive|weren't alive)",
+]
+
+# POISONING: Poison Control 1-800-222-1222, and 911 if symptomatic
+
+[categories.poisoning]
+level = "POISONING"
+patterns = [
+    "(?:swallowed|drank|drunk|drink|ate|eaten|eat|ingested|drinking|swallowing|sipped|got into|took a (?:sip|drink|swig|gulp) of)(?: some| a| the| a bottle of| a cup of| some of| of)*(?: (?:my|his|her|the|their))?(?: \\w+){0,2}? (?:bleach|cleaner|cleaning (?:product|solution|fluid|spray|supplies|stuff)|detergent|laundry (?:pod|soap)s?|tide pods?|dishwasher (?:pods?|detergent)|antifreeze|drano|lye|ammonia|pesticide|bug spray|weed killer|rat poison|poison|lighter fluid|gasoline|paint thinner|windshield (?:washer )?fluid|nail polish remover|button batter(?:y|ies)|batter(?:y|ies)|lysol|clorox|windex|mouthwash|hand sanitizer)",
+    "(?:took|take|taken|taking|given|gave (?:him|her|them|me)|got|swallowed|ate|had) (?:\\w+ ){0,2}wrong (?:medicine|medication|meds|pills?|dose|prescription)",
+    "(?:took|taken|taking|swallowed|ate|got) (?:someone else's|somebody else's|(?:my|his|her|their|our) (?:\\w+'s)|\\w+'s) (?:pills?|medicine|medication|meds|prescription|tablets?)",
+    "got into (?:the |my |his |her |our |their |some |a )?(?:\\w+'s )?(?:medicine|medication|meds|pills?|vitamins|prescriptions?|pill bottle|medicine cabinet|tylenol|advil|ibuprofen|cleaning)",
+    "(?:ate|swallowed|chewed) (?:(?:some|a|bunch|handful|several|the|my|his|her|their|few|of|all) )*(?:\\w+'s )?(?:pills?|tablets?|medicine|medication|meds|gummies|vitamins|tylenol|advil|ibuprofen|edibles?)",
+    "(?:double|accidental|extra) dose",
+    "doubled (?:up )?(?:on )?(?:my|his|her|their) (?:medicine|medication|meds|pills|dose)",
+    "took (?:two|2) doses",
+    "took (?:a |my |his |her |their )?(?:\\w+ )?(?:dose|medicine|medication|meds|pills?) twice",
+    "(?:accidentally|mistakenly|by accident) (?:took|take|gave|given|taken|swallowed|ate|drank)(?: \\w+){0,4}? (?:pills?|medicine|medication|meds|dose|doses|tablets?)",
+    "(?:took|taken|gave|given|swallowed|ate|drank)(?: \\w+){0,4}? (?:pills?|medicine|medication|meds|dose|doses|tablets?) (?:by accident|by mistake|accidentally)",
+    "(?<!food )poison(?:ed|ing)\\b",
+]
+
+# URGENT: same day or nurse line. Not a 911 situation.
+
+[categories.post_op_fever]
+level = "URGENT"
+patterns = ['fever(?:ish)?', 'chills', 'running a (?:temp|temperature)', 'temperature of']
+context = ['surg\w*', 'operation', 'procedure', 'post[- ]?op', 'incision', 'stitches', 'staples']
+
+[categories.wound_infection]
+level = "URGENT"
+patterns = [
+    "(?:incision|wound|stitches|staples|scar|surgical site)(?:\\s+\\S+){0,4}?\\s+(?:is |are |looks? |getting |has |have |seems? |been |gotten |turned |turning |very |really |all )*(?:red|hot|warm|swollen|draining|oozing|leaking|pus\\w*|infected|smells?|weeping|coming apart|split open|opened up)",
+    "(?:pus|drainage|discharge|oozing|fluid) (?:is )?(?:from|coming out of|out of|leaking from|draining from) (?:my|his|her|their|the) (?:incision|wound|stitches|cut|surgery site|scar)",
+    "infected (?:incision|wound|stitches|surgical site)",
+]
+
+[categories.calf_clot]
+level = "URGENT"
+patterns = [
+    "calf (?:is |has been |feels? |getting |got |really |very |so )*(?:pain\\w*|swollen|swelling|tender|hurts?|hurting|sore|red|warm|hot|tight)",
+    "(?:pain|swelling|tenderness|cramp\\w*) in (?:my|his|her|their|the) calf",
+    "(?:leg|calf) (?:is |has been |feels? |getting |got )*(?:swollen|swelling) and (?:red|warm|hot|painful)",
+]
+context = ['surg\w*', 'operation', 'procedure', 'post[- ]?op', '\bcast\b', 'splint', '\bboot\b', 'immobiliz\w*', 'replacement']
+
+[categories.cannot_bear_weight]
+level = "URGENT"
+patterns = [
+    "(?:can(?:not|'t)|could(?: not|n't)|unable to|won't|doesn't|does not|isn't able to|is not able to) (?:put|bear) (?:any )?weight",
+    "(?:can(?:not|'t)|could(?: not|n't)|unable to|won't|doesn't|does not) (?:stand|walk) on (?:it|my|his|her|their|the)",
+]
+
+[categories.septic_joint]
+level = "URGENT"
+patterns = [
+    "(?:knee|joint|ankle|elbow|hip|shoulder|wrist)s? (?:is |are |feels? |looks? |got |gotten |getting |really |very |all )*(?:hot|warm|red)",
+    "(?:hot|warm|red),? (?:and )?swollen (?:knee|joint|ankle|elbow|hip|wrist|shoulder)",
+    "swollen,? (?:and )?(?:hot|warm|red) (?:knee|joint|ankle|elbow|hip|wrist|shoulder)",
+]
+context = ['fever\w*', 'chills', 'temperature']
+
+[categories.tight_cast]
+level = "URGENT"
+patterns = [
+    "cast (?:is |feels |seems |getting |has gotten |got )*(?:way |really |very |so |too )*(?:too )?tight",
+    "tight cast",
+    "cast (?:is )?(?:cutting|digging) (?:in|into)",
+    "swelling (?:in|under|around|above|below) (?:my|his|her|their|the) cast",
+    "(?:fingers?|toes?|hands?|foot|feet) (?:is |are |keep |keeps |getting |got )*(?:swollen|swelling|puffy)",
+]
+context = ['\bcast\b', 'splint']

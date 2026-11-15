@@ -300,22 +300,10 @@ def test_past_stroke_then_follow_up_continues_booking(tmp_path):
 @pytest.mark.parametrize(
     "report",
     [
-        pytest.param(
-            "I don't want to live anymore",
-            marks=gap("suicidal ideation phrasing is not detected"),
-        ),
-        pytest.param(
-            "my face is swelling up and I can't swallow",
-            marks=gap("facial swelling with trouble swallowing is not detected"),
-        ),
-        pytest.param(
-            "I'm having an allergic reaction and my throat feels tight",
-            marks=gap("anaphylaxis phrasing is not detected"),
-        ),
-        pytest.param(
-            "I fell and the bone is sticking out of my leg",
-            marks=gap("an open fracture is not detected"),
-        ),
+        "I don't want to live anymore",
+        "my face is swelling up and I can't swallow",
+        "I'm having an allergic reaction and my throat feels tight",
+        "I fell and the bone is sticking out of my leg",
     ],
 )
 def test_missed_emergency(report, tmp_path):

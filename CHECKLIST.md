@@ -13,7 +13,7 @@ Every phase must keep that baseline green, and must remove the xfail marks for t
   Move language parsing out of `conversation.py` into `switchboard/understanding.py`. It covers: yes/no with the rest of the reply kept, recipient (self / other plus an optional name), name in the opening sentence, and booking verbs including "needs". Every stage uses these parsers. The model, when configured, fills the same structure.
   Done: the gap tests for proxy phrasing, clarifying dead end, name in opener and "needs" pass without xfail; baseline green.
 
-- [ ] **Phase 3: Triage levels and safety phrase set.**
+- [x] **Phase 3: Triage levels and safety phrase set.**
   Triage levels: emergency (911), crisis (988), poisoning, urgent same-day, routine. The symptom list moves into a data file that includes orthopedic warning signs. Add a labelled safety set and a CI gate that requires 100% of the must-catch phrases to be caught.
   Done: `uv run pytest -q tests/test_safety.py` passes, including the safety set; the missed-emergency gap tests pass.
 
