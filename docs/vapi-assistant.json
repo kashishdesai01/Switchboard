@@ -22,7 +22,10 @@
     "provider": "deepgram", "model": "aura-2", "voiceId": "helena", "speed": 0.9,
     "chunkPlan": {"enabled": true, "minCharacters": 80}
   },
-  "startSpeakingPlan": {"waitSeconds": 0.65},
+  "startSpeakingPlan": {
+    "waitSeconds": 0.65,
+    "transcriptionEndpointingPlan": {"onPunctuationSeconds": 0.4, "onNoPunctuationSeconds": 1.5, "onNumberSeconds": 1.2}
+  },
   "stopSpeakingPlan": {"numWords": 2, "voiceSeconds": 0.3},
   "backgroundSound": "off",
   "maxDurationSeconds": 480,

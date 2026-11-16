@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Synthetic clinic voice and scheduling demo"
 requires-python = ">=3.12"
 dependencies = [
+    "anthropic>=2.9.0",
     "fastapi>=0.115,<1",
     "httpx>=0.28,<1",
     "twilio>=9,<10",

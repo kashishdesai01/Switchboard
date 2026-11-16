@@ -56,7 +56,19 @@ Use fictional patient details. Vapi receives the conversation, and this is a syn
 
 5. Say “Book a follow-up this Saturday.” When asked who the visit is for, say “For me.” You can use **Maria Lopez**, born **July 2, 1984**, or use a fictional name and date of birth to book a first visit. Confirm the readback, choose an option, and confirm the final time after Helena finishes speaking. Hang up after hearing the result. Open [local Operations](http://127.0.0.1:8766/operations) and use the operations token from step 1 to check the call outcome and email outbox. Ask for the front desk in a separate call to test the staff work queue.
 
-If you hear the greeting but the call won't continue, check that the tunnel is running and the configured model URL ends in `/vapi`. A 401 in the server log means the Vapi request's secret header and the app secret differ. If Switchboard cannot verify playback, it repeats the details with a four-digit code at the end. If the details are correct, say the code after the read-back. A fresh code applies to each prompt.
+If you hear the greeting but the call won't continue, check that the tunnel is running and the configured model URL ends in `/vapi`. A 401 in the server log means the Vapi request's secret header and the app secret differ. If you talk over a read-back, Switchboard says it again before it accepts your yes.
+
+## Let Claude run the conversation (agent engine)
+
+By default the phone line uses the scripted call, which asks each question in a fixed order. To let Claude hold the whole conversation instead, set these before starting the server in step 1:
+
+```zsh
+export SWITCHBOARD_CALL_ENGINE=agent
+export ANTHROPIC_API_KEY=...            # required; without it the line stays scripted
+export SWITCHBOARD_AGENT_MODEL=claude-haiku-5-5   # optional; falls back to SWITCHBOARD_CLAUDE_MODEL
+```
+
+Only Vapi calls switch. The browser call lab and Twilio keep the scripted call. Claude looks up patients, finds times and proposes changes through tools, while code still guards every write. The patient must be verified first, a change is read back word for word and booked only after the caller hears the whole read-back and says yes, and emergency phrases get the 911 guidance without consulting the model. Keypad digits reach Claude as "User keyed: 19840702", and the staff transcript shows only that digits were entered. Outcomes, staff work items and transcripts appear in Operations the same way as scripted calls. If the model fails twice in a row, the caller is passed to the front desk. Unset `SWITCHBOARD_CALL_ENGINE` and restart to go back to the scripted call.
 
 ## Refresh speech settings on an existing assistant
 

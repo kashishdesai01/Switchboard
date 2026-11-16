@@ -26,9 +26,15 @@ from switchboard.understanding import (
     answer_to_confirmation,
     booking_recipient,
     model_says_self,
+    name_from_reply,
     proxy_request,
     states_name,
 )
+
+
+def plain_yes(meaning: TurnMeaning | None) -> bool:
+    """The reading answers the question with an unhedged yes, whatever stage action it chose."""
+    return meaning is not None and meaning.answer == "yes" and not meaning.doubt
 
 
 class StagesMixin:
@@ -61,14 +67,24 @@ class StagesMixin:
         action: str,
         value: str,
     ) -> Reply:
+        # The reading decides; the regex parser only answers when there is no reading,
+        # and still supplies a name or relation the caller gave.
         recipient = booking_recipient(text)
-        if action == "other" or recipient.kind == "other":
+        kind = recipient.kind if meaning is None else None
+        if action == "other":
+            kind = "other"
+        elif action == "self" and (model_says_self(text, value) or recipient.kind == "self"):
+            kind = "self"
+        elif meaning is not None and not meaning.doubt and action != "self":
+            # The reading names no recipient: a plain "for me" from the parser stands.
+            kind = recipient.kind
+        if kind == "other":
             said = proxy_request(words)
             self.party = Party("other", said.relation if said else None, recipient.name)
             if not self.proxy_allowed:
                 self.pending_request = None
             return self._ask_proxy_permission()
-        if recipient.kind == "self" or (action == "self" and model_says_self(text, value)):
+        if kind == "self":
             assert self.pending_request is not None
             opening_words, opening_text, opening_meaning = self.pending_request
             self.pending_request = None
@@ -94,11 +110,14 @@ class StagesMixin:
         action: str,
         value: str,
     ) -> Reply:
+        if answer == "yes" and not (meaning and meaning.action == "affirm"):
+            # Without a reading, a bare "okay" is no permission.
+            answer = answer_to_confirmation(words, self.intent)
         if self.proxy_allowed:
-            if answer_to_confirmation(words) == "no":
+            if answer == "no":
                 self.pending_request = None
                 return self.say("Okay. I haven't made any changes.", outcome="declined")
-            if answer_to_confirmation(words, self.intent) == "yes":
+            if answer == "yes":
                 assert self.pending_request is not None
                 opening_words, opening_text, opening_meaning = self.pending_request
                 self.pending_request = None
@@ -151,6 +170,14 @@ class StagesMixin:
         if self.provider or answer == "yes" or words in {"anyone", "another doctor"}:
             self._set_window(words)
             return await self._identify()
+        if action == "preferences" and await self._update_preferences(value.casefold()):
+            # A location or time preference is agreement with a condition the search keeps.
+            self._set_window(words)
+            return await self._identify()
+        if plain_yes(meaning):
+            # "Sure, anyone is fine": a yes with a preference the search can't narrow by.
+            self._set_window(words)
+            return await self._identify()
         if answer == "no":
             return self.say("Of course. I haven't booked anything.", outcome="declined")
         return self.say("Would you like to hear times with another doctor here?")
@@ -171,6 +198,12 @@ class StagesMixin:
             and not self._identity_details(text)
         ):
             return self._capture_name(value)
+        if meaning is not None and action != "name" and self.nameless_replies < 1:
+            # The model heard no name ("It's me.", "Why do you need it?"): ask again
+            # rather than read the words as one. Only once, so a name the model
+            # fails to recognize still gets through on the second try.
+            self.nameless_replies += 1
+            return self._ask_name()
         return self._capture_name(text)
 
     async def _stage_check_name(
@@ -222,6 +255,11 @@ class StagesMixin:
             action == "preferences" and await self._update_preferences(value.casefold())
         ):
             return await self._offer()
+        if plain_yes(meaning):
+            # "Yes please, whatever's soonest": a yes whose preference names no day.
+            self.day = None
+            self.days = ()
+            return await self._offer()
         return self.say(
             "Would you like the next available day, or is there another day you prefer?"
         )
@@ -242,27 +280,58 @@ class StagesMixin:
             self.digits = ""
             return self.say("Enter eight digits in year, month, day order.")
         dates = birth_dates(text, self.scheduling.now().date())
+        if not dates and action == "name" and (name := name_from_reply(value)):
+            # The caller corrects the name while we wait for the birth date.
+            self.name = name
+            return self.say(
+                f"Thanks, I have {name}. "
+                + (
+                    "What's the patient's date of birth?"
+                    if self.party.proxy
+                    else "What's your date of birth?"
+                )
+            )
         if len(dates) > 1:
             self.dob_fragment = None
             return self.say(
                 "I heard two different birth dates. Could you say your birth date once?"
             )
+        said = text
         if not dates and action == "birth_date" and value:
             text = value
             dates = birth_dates(text, self.scheduling.now().date())
+            if dates:
+                # Never take a year the model filled in ("19" as 2019, "8" as 2008).
+                heard = date_words(f"{self.dob_year_start} {said}")
+                dates = [d for d in dates if str(d.year) in heard]
         self.dob = next(iter(dates), None)
         if self.dob is None and self.dob_fragment:
-            years = set(re.findall(r"\b\d{4}\b", date_words(text)))
+            # Complete the month and day only with a year the caller said in full,
+            # joined to any part of it cut off the last reply ("19" ... "85").
+            spoken = date_words(f"{self.dob_year_start} {said}".strip())
+            years = set(re.findall(r"\b(?:19|20)\d{2}\b", spoken))
             if len(years) == 1:
                 self.dob = parse_date(f"{self.dob_fragment} {years.pop()}")
+            elif not years and (start := re.fullmatch(r"\D*?(\d{1,3})\D*", spoken)):
+                self.dob_year_start = start[1]
         if self.dob is None:
-            fragment = re.search(
+            # A month and day without a full year, in the caller's words first,
+            # then in the model's (which may not repeat a cut-off year).
+            month_day = re.compile(
                 rf"\b(?:\d{{1,2}}\s+(?:(?:of|to)\s+)?(?:{MONTH_PATTERN})|"
-                rf"(?:{MONTH_PATTERN})\s+\d{{1,2}})\b",
-                date_words(text),
+                rf"(?:{MONTH_PATTERN})\s+\d{{1,2}})\b"
             )
-            if fragment and not re.search(r"\b\d{4}\b", text):
+            source = date_words(said)
+            fragment = month_day.search(source)
+            if fragment is None and text != said:
+                source = date_words(text)
+                fragment = month_day.search(source)
+            if fragment and not re.search(r"\b\d{4}\b", date_words(said)):
                 self.dob_fragment = fragment[0].replace(" to ", " of ")
+                # "18th August 19": the year was cut off after its first digits.
+                tail = source[fragment.end() :]
+                start = re.fullmatch(r"\W*(\d{1,3})\W*", tail)
+                self.dob_year_start = start[1] if start else ""
                 return self.say("I caught the month and day. What year were you born?")
         if self.dob is None or self.dob > self.scheduling.now().date():
             self.dob = None
@@ -278,9 +347,12 @@ class StagesMixin:
                     "You can also say use the keypad or ask for the front desk."
                 )
             if self.dob_fragment:
-                return self.say("I have the month and day. What year were you born?")
+                return self.say(
+                    "I have the month and day. What year were you born? Please say all four digits."
+                )
             return self.say("Could you repeat your birth date, including the year?")
         self.dob_fragment = None
+        self.dob_year_start = ""
         self.dob_retries = 0
         self.stage = "check_dob"
         return self._read_identity()

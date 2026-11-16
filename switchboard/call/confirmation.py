@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from collections.abc import Callable
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 from switchboard.call.vocabulary import (
     LOG,
@@ -13,12 +15,16 @@ from switchboard.call.vocabulary import (
 )
 from switchboard.frontdesk import email_address
 from switchboard.intents import TurnMeaning
-from switchboard.scheduling import instant
+from switchboard.scheduling import Change, Scheduling, instant
 from switchboard.spoken import (
     parse_time,
     requested_days,
 )
-from switchboard.store import Conflict, Unavailable
+from switchboard.store import Conflict, Resource, Unavailable
+
+if TYPE_CHECKING:
+    from switchboard.frontdesk import FrontDesk
+    from switchboard.operations import Trace
 
 
 class ConfirmationMixin:
@@ -172,41 +178,14 @@ class ConfirmationMixin:
                 "telecom": [{"system": "email", "value": self.email_on_file}],
             }
             change = replace(change, new_patient=patient)
-        if self.frontdesk and not self.party.proxy:
-            try:
-                details = ""
-                if change.hold:
-                    start = instant(change.hold.slot["start"]).astimezone(
-                        self.scheduling.clinic.timezone
-                    )
-                    details = f"{self.describe(change.hold.slot)}\nYear: {start.year}\nClinic time zone: {self.scheduling.clinic.timezone.key}"
-                await self.frontdesk.stage(
-                    change,
-                    self.trace.id if self.trace else None,
-                    self.scheduling.clinic.name,
-                    details,
-                    self.email_on_file,
-                )
-            except sqlite3.Error as exc:
-                raise Unavailable("Front desk journal unavailable") from exc
-        if self.trace:
-            try:
-                await self.trace.begin_mutation(change.operation, change.action)
-            except sqlite3.Error as exc:
-                raise Unavailable("Operation journal unavailable") from exc
-        status = "unknown"
-        try:
-            await self.scheduling.commit(change)
-            status = "committed"
-        except Conflict:
-            status = "rejected"
-            raise
-        finally:
-            if self.trace:
-                try:
-                    await self.trace.finish_mutation(change.operation, status)
-                except sqlite3.Error:
-                    LOG.warning("Operation journal update unavailable")
+        await commit_change(
+            self.scheduling,
+            change,
+            trace=self.trace,
+            desk=self.frontdesk if self.frontdesk and not self.party.proxy else None,
+            describe=self.describe,
+            email=self.email_on_file,
+        )
         self.change = None
         outcome = {"book": "booked", "reschedule": "rescheduled", "cancel": "cancelled"}[
             change.action
@@ -215,18 +194,7 @@ class ConfirmationMixin:
             delivery = None
             email_note = ""
             if self.frontdesk and not self.party.proxy:
-                try:
-                    delivery = await self.frontdesk.activate_notice(change.operation)
-                except sqlite3.Error:
-                    delivery = "awaiting_commit"
-                if delivery in {"queued", "sent", "sending"}:
-                    email_note = " Your confirmation email is queued."
-                elif delivery == "captured":
-                    email_note = " Your confirmation was saved to the demo outbox."
-                elif delivery == "needs_address":
-                    email_note = " The front desk will need an email address for the confirmation."
-                else:
-                    email_note = " The front desk can check your confirmation email status."
+                delivery, email_note = await confirmation_notice(self.frontdesk, change.operation)
             return self.say(
                 (
                     f"The patient is {outcome} for {self.describe(change.hold.slot)}."
@@ -244,3 +212,71 @@ class ConfirmationMixin:
             else "Your appointment was cancelled.",
             outcome=outcome,
         )
+
+
+async def commit_change(
+    scheduling: Scheduling,
+    change: Change,
+    *,
+    trace: Trace | None,
+    desk: FrontDesk | None,
+    describe: Callable[[Resource], str],
+    email: str | None,
+) -> None:
+    """Commit a confirmed change with the front desk notice staged and the write tracked.
+
+    ``desk`` is the front desk that should email the patient, or None (no desk, or
+    the caller is not the patient). The operation journal records the write, so an
+    uncertain result can be reviewed. Raises Conflict when the write is rejected and
+    Unavailable when its outcome is unknown.
+    """
+    if desk:
+        try:
+            details = ""
+            if change.hold:
+                start = instant(change.hold.slot["start"]).astimezone(scheduling.clinic.timezone)
+                details = f"{describe(change.hold.slot)}\nYear: {start.year}\nClinic time zone: {scheduling.clinic.timezone.key}"
+            await desk.stage(
+                change,
+                trace.id if trace else None,
+                scheduling.clinic.name,
+                details,
+                email,
+            )
+        except sqlite3.Error as exc:
+            raise Unavailable("Front desk journal unavailable") from exc
+    if trace:
+        try:
+            await trace.begin_mutation(change.operation, change.action)
+        except sqlite3.Error as exc:
+            raise Unavailable("Operation journal unavailable") from exc
+    status = "unknown"
+    try:
+        await scheduling.commit(change)
+        status = "committed"
+    except Conflict:
+        status = "rejected"
+        raise
+    finally:
+        if trace:
+            try:
+                await trace.finish_mutation(change.operation, status)
+            except sqlite3.Error:
+                LOG.warning("Operation journal update unavailable")
+
+
+async def confirmation_notice(desk: FrontDesk, operation: str) -> tuple[str | None, str]:
+    """Send the staged confirmation notice; return its delivery status and what to say."""
+    try:
+        delivery = await desk.activate_notice(operation)
+    except sqlite3.Error:
+        delivery = "awaiting_commit"
+    if delivery in {"queued", "sent", "sending"}:
+        note = " Your confirmation email is queued."
+    elif delivery == "captured":
+        note = " Your confirmation was saved to the demo outbox."
+    elif delivery == "needs_address":
+        note = " The front desk will need an email address for the confirmation."
+    else:
+        note = " The front desk can check your confirmation email status."
+    return delivery, note

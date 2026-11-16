@@ -1,0 +1,1481 @@
+# Caller replies in their own words, the reading a correct model gives them, and
+# what the call should then do. Loaded by evals/phrasings.py; used by
+# tests/test_phrasings.py (fake model returns `reading`) and evals/run_phrasings.py
+# (real model must produce `reading`).
+#
+# [setups.<name>]  caller turns, answered without a model, that bring a fresh call
+#                  (Bayview demo clinic, front desk on) to `stage`. `question` is a
+#                  part of the assistant's last reply: the question the case answers.
+#
+# [[cases]]
+#   id          unique, lowercase with dashes
+#   stage       the stage the caller is answering
+#   setup       setup name (defaults to the stage name)
+#   say         the caller's reply ...
+#   reading     ... and its expected reading: action (or a list of equally correct
+#               actions), optional value (compared loosely; "<reply>" means the exact
+#               reply; dates compare as dates) or value_contains, emergency (default
+#               false), optional needs_staff, optional answer: the answer to the
+#               question just asked (yes / no / unclear / not_applicable, or a list).
+#               On confirmation stages it defaults to what the action implies
+#               (affirm: yes, decline: no, unclear: unclear); the eval scores it.
+#   live_reading  optional: the wrong reading a real model gave on a reported live
+#               call. Only the fake harness uses it; the code must still cope.
+#   turns       instead of say/reading, a list of { say, reading, live_reading } for
+#               replies split over several turns.
+#   expect      advance (to = stage) | reask (stays on the stage, no outcome) |
+#               decline | handoff | booked | goodbye | info | no_write (no outcome)
+#   reply_has / reply_lacks / state   optional extra checks after the last turn;
+#               state compares str(call.<dotted attribute>).
+#   must_pass   true for clear cases, hedges that must stay unclear, and the reported
+#               failures; false for honestly ambiguous ones.
+#   reported    number of the reported live-call failure (CHECKLIST.md).
+#   xfail       why the code mishandles the case today (fake harness only).
+
+[setups.intent]
+stage = "intent"
+question = "How can I help today?"
+turns = []
+
+[setups.booking_recipient]
+stage = "booking_recipient"
+question = "Is the appointment for you or for someone else?"
+turns = ["book a follow-up"]
+
+[setups.proxy_permission]
+stage = "proxy_permission"
+question = "Do you have permission to book a visit for this patient?"
+turns = ["book a follow-up", "someone else"]
+
+[setups.proxy_permission_cancel]
+stage = "proxy_permission"
+question = "Do you have permission to cancel this patient's appointment?"
+turns = ["I need to cancel the appointment for my mom"]
+existing = 1
+
+[setups.name]
+stage = "name"
+question = "What name should I use?"
+turns = ["book a follow-up", "For me."]
+
+[setups.name_patient]
+stage = "name"
+question = "What's the patient's full name?"
+turns = ["book a follow-up", "someone else", "yes"]
+
+[setups.check_name]
+stage = "check_name"
+question = "I heard the patient's name as John Smith. Is that correct?"
+turns = ["book a follow-up", "it's for John Smith", "yes"]
+
+[setups.dob]
+stage = "dob"
+question = "What's your date of birth?"
+turns = ["book a follow-up", "For me.", "Maria Lopez"]
+
+[setups.check_dob]
+stage = "check_dob"
+question = "I heard Maria Lopez, born July 2, 1984. Is that correct?"
+turns = ["book a follow-up", "For me.", "Maria Lopez", "July 2 1984"]
+
+[setups.other_provider]
+stage = "other_provider"
+question = "Would you like to hear times with another doctor here?"
+turns = ["I'd like to book a follow-up with Dr. Smith", "For me."]
+
+[setups.day_alternative]
+stage = "day_alternative"
+question = "I don't have an opening today. Would you like the next available day?"
+turns = ["book a follow-up today after 4:50 pm", "For me.", "Maria Lopez", "July 2 1984", "yes"]
+
+[setups.select_slot]
+stage = "select_slot"
+question = "Which time works for you? Option 1: Tuesday, November 10 at 09:25 AM"
+turns = ["book a follow-up", "For me.", "Maria Lopez", "July 2 1984", "yes"]
+
+[setups.confirm_change]
+stage = "confirm_change"
+question = "Book your follow-up on Tuesday, November 10 at 09:25 AM"
+turns = ["book a follow-up", "For me.", "Maria Lopez", "July 2 1984", "yes", "one"]
+
+[setups.email_readback]
+stage = "email_readback"
+question = "I heard maria at example dot com. Is that the right email address?"
+turns = [
+    "book a follow-up", "For me.", "Maria Lopez", "July 2 1984", "yes", "one",
+    "change my email", "maria at example dot com",
+]
+
+[setups.anything_else]
+stage = "anything_else"
+question = "Is there anything else I can help with?"
+turns = ["what are your hours?"]
+
+# ---------------------------------------------------------------- intent (opener)
+
+[[cases]]
+id = "intent-book-follow-up"
+stage = "intent"
+say = "I'd like to book a follow-up."
+reading = { action = "book" }
+expect = "advance"
+to = "booking_recipient"
+must_pass = true
+
+[[cases]]
+id = "intent-book-with-provider-and-week"
+stage = "intent"
+say = "Hi, I need to make an appointment with Dr. Patel sometime next week."
+reading = { action = "book" }
+expect = "advance"
+to = "booking_recipient"
+must_pass = true
+
+[[cases]]
+id = "intent-book-long-shoulder"
+stage = "intent"
+say = "Yeah hi, so I hurt my shoulder playing tennis a couple of weeks ago and it's still sore, I was hoping to get in to see someone, maybe Thursday afternoon?"
+reading = { action = "book" }
+expect = "advance"
+to = "booking_recipient"
+must_pass = true
+
+[[cases]]
+id = "intent-cancel"
+stage = "intent"
+say = "I need to cancel my appointment."
+reading = { action = "cancel" }
+expect = "advance"
+to = "name"
+must_pass = true
+
+[[cases]]
+id = "intent-reschedule-long"
+stage = "intent"
+say = "I need to reschedule, something came up at work and I can't make it on Thursday, could we do next Monday instead?"
+reading = { action = "reschedule" }
+expect = "advance"
+to = "name"
+must_pass = true
+
+[[cases]]
+id = "intent-insurance-question"
+stage = "intent"
+say = "Do you take Aetna?"
+reading = { action = ["insurance", "accepted_insurance"] }
+expect = "info"
+must_pass = true
+
+[[cases]]
+id = "intent-hours"
+stage = "intent"
+say = "What time are you open until today?"
+reading = { action = "hours" }
+expect = "info"
+must_pass = true
+
+[[cases]]
+id = "intent-refill-to-staff"
+stage = "intent"
+say = "I need a refill on my pain medication."
+reading = { action = "staff", needs_staff = true }
+expect = "handoff"
+must_pass = true
+
+[[cases]]
+id = "intent-bare-hi"
+stage = "intent"
+say = "Hi."
+reading = { action = "unclear" }
+expect = "reask"
+reply_lacks = "for you or for someone else"
+reply_has = "How can I help"
+must_pass = true
+reported = 4
+note = "Live: the model read a bare greeting as book and the call asked who the visit is for."
+
+[[cases]]
+id = "intent-hello-how-are-you"
+stage = "intent"
+say = "Hello, how are you?"
+reading = { action = "unclear" }
+expect = "reask"
+reply_lacks = "for you or for someone else"
+reply_has = "How can I help"
+must_pass = true
+
+[[cases]]
+id = "intent-short-opener-for-uncle"
+stage = "intent"
+say = "I want to schedule an appointment for my uncle."
+reading = { action = "book" }
+expect = "advance"
+to = "proxy_permission"
+must_pass = true
+
+[[cases]]
+id = "intent-book-for-myself"
+stage = "intent"
+say = "I want to book a checkup for myself."
+reading = { action = "book", patient = "self" }
+expect = "advance"
+to = "name"
+reply_lacks = "for you or for someone else"
+must_pass = true
+note = "The caller already said who the patient is; asking again is the reported 'doesn't understand context' failure."
+
+[[cases]]
+id = "intent-for-me-with-provider"
+stage = "intent"
+say = "I need an appointment for me with Dr. Chen next week."
+reading = { action = "book", patient = "self", value_contains = "Chen" }
+expect = "advance"
+to = "name"
+reply_lacks = "for you or for someone else"
+must_pass = true
+
+[[cases]]
+id = "intent-book-patient-unstated"
+stage = "intent"
+say = "I'd like to book a follow-up appointment."
+reading = { action = "book" }
+expect = "advance"
+to = "booking_recipient"
+must_pass = true
+note = "No patient stated: the call still asks who the visit is for."
+
+[[cases]]
+id = "intent-long-opener-for-uncle"
+stage = "intent"
+say = "I want to schedule an appointment for my uncle, he had a stroke a few months ago and was seen by Doctor Chen, and he's been doing physical therapy since."
+reading = { action = "book" }
+expect = "advance"
+to = "proxy_permission"
+must_pass = true
+reported = 3
+
+[[cases]]
+id = "intent-long-opener-keeps-provider"
+stage = "intent"
+turns = [
+    { say = "I want to schedule an appointment for my uncle, he had a stroke a few months ago and was seen by Doctor Chen, and he's been doing physical therapy since.", reading = { action = "book" } },
+    { say = "Yes.", reading = { action = "affirm" } },
+]
+expect = "advance"
+to = "name"
+state = { provider = "chen", "party.patient" = "other" }
+must_pass = true
+reported = 3
+
+[[cases]]
+id = "intent-father-knee-history"
+stage = "intent"
+say = "My father needs to see Dr. Chen next week, his knee replacement was back in March and it's time for his check."
+reading = { action = "book" }
+expect = "advance"
+to = "proxy_permission"
+must_pass = true
+
+[[cases]]
+id = "intent-vague-letter"
+stage = "intent"
+say = "Um, I'm not really sure, I got a letter saying I should call you."
+reading = { action = "unclear" }
+expect = "reask"
+must_pass = false
+note = "Could fairly be read as a booking request."
+
+# ---------------------------------------------------------------- booking_recipient
+
+[[cases]]
+id = "recipient-for-me"
+stage = "booking_recipient"
+say = "For me."
+reading = { action = "self", value = "<reply>" }
+expect = "advance"
+to = "name"
+must_pass = true
+
+[[cases]]
+id = "recipient-its-for-me-thanks"
+stage = "booking_recipient"
+say = "It's for me, thanks."
+reading = { action = "self", value = "<reply>" }
+expect = "advance"
+to = "name"
+must_pass = true
+
+[[cases]]
+id = "recipient-yes-its-for-me"
+stage = "booking_recipient"
+say = "Yes, it's for me."
+reading = { action = "self", value = "<reply>" }
+expect = "advance"
+to = "name"
+must_pass = true
+
+[[cases]]
+id = "recipient-just-me-bad-knee"
+stage = "booking_recipient"
+say = "Oh it's just for me, I'm the one with the bad knee."
+reading = { action = "self", value = "<reply>" }
+expect = "advance"
+to = "name"
+must_pass = true
+
+[[cases]]
+id = "recipient-me-im-the-patient"
+stage = "booking_recipient"
+say = "Me. I'm the patient."
+reading = { action = "self", value = "<reply>" }
+expect = "advance"
+to = "name"
+must_pass = true
+
+[[cases]]
+id = "recipient-my-son"
+stage = "booking_recipient"
+say = "It's for my son."
+reading = { action = "other" }
+expect = "advance"
+to = "proxy_permission"
+must_pass = true
+
+[[cases]]
+id = "recipient-mother-long"
+stage = "booking_recipient"
+say = "My mother, she's 82 and can't really use the phone anymore."
+reading = { action = "other" }
+expect = "advance"
+to = "proxy_permission"
+must_pass = true
+
+[[cases]]
+id = "recipient-dad-hip-long"
+stage = "booking_recipient"
+say = "I'm booking it for my dad, he had a hip replacement last month and needs his follow-up."
+reading = { action = "other" }
+expect = "advance"
+to = "proxy_permission"
+must_pass = true
+
+[[cases]]
+id = "recipient-named-person"
+stage = "booking_recipient"
+say = "It's for John Smith."
+reading = { action = "other" }
+expect = "advance"
+to = "proxy_permission"
+state = { "party.name" = "John Smith" }
+must_pass = true
+
+[[cases]]
+id = "recipient-bare-yes"
+stage = "booking_recipient"
+say = "Yes."
+reading = { action = "unclear" }
+expect = "reask"
+must_pass = true
+
+[[cases]]
+id = "recipient-two-people"
+stage = "booking_recipient"
+say = "Well, it's for my husband, but I'd also like one for myself."
+reading = { action = "unclear" }
+expect = "reask"
+must_pass = true
+
+[[cases]]
+id = "recipient-hedged"
+stage = "booking_recipient"
+say = "I think it's for me? Maybe?"
+reading = { action = "unclear" }
+expect = "reask"
+must_pass = true
+
+# ---------------------------------------------------------------- proxy_permission
+
+[[cases]]
+id = "permission-bare-yes"
+stage = "proxy_permission"
+say = "Yes."
+reading = { action = "affirm" }
+expect = "advance"
+to = "name"
+must_pass = true
+
+[[cases]]
+id = "permission-yes-comma-i-do"
+stage = "proxy_permission"
+say = "Yes, I do."
+reading = { action = "affirm" }
+expect = "advance"
+to = "name"
+must_pass = true
+reported = 1
+
+[[cases]]
+id = "permission-yes-i-do"
+stage = "proxy_permission"
+say = "Yes I do"
+reading = { action = "affirm" }
+expect = "advance"
+to = "name"
+must_pass = true
+reported = 1
+
+[[cases]]
+id = "permission-he-said-its-fine"
+stage = "proxy_permission"
+say = "yeah he said it's fine for me to book"
+reading = { action = "affirm" }
+expect = "advance"
+to = "name"
+must_pass = true
+reported = 1
+
+[[cases]]
+id = "permission-i-do-yes"
+stage = "proxy_permission"
+say = "I do, yes."
+reading = { action = "affirm" }
+expect = "advance"
+to = "name"
+must_pass = true
+
+[[cases]]
+id = "permission-legal-guardian"
+stage = "proxy_permission"
+say = "Yes, I'm his legal guardian."
+reading = { action = "affirm" }
+expect = "advance"
+to = "name"
+must_pass = true
+
+[[cases]]
+id = "permission-absolutely"
+stage = "proxy_permission"
+say = "Absolutely."
+reading = { action = "affirm" }
+expect = "advance"
+to = "name"
+must_pass = true
+
+[[cases]]
+id = "permission-she-asked-me"
+stage = "proxy_permission"
+say = "Of course, she asked me to call for her."
+reading = { action = "affirm" }
+expect = "advance"
+to = "name"
+must_pass = true
+
+[[cases]]
+id = "permission-bare-no"
+stage = "proxy_permission"
+say = "No."
+reading = { action = "decline" }
+expect = "decline"
+must_pass = true
+
+[[cases]]
+id = "permission-no-ask-first"
+stage = "proxy_permission"
+say = "No, I don't, I'd better ask him first."
+reading = { action = "decline" }
+expect = "decline"
+must_pass = true
+
+[[cases]]
+id = "permission-not-yet"
+stage = "proxy_permission"
+say = "Not yet, I'll have to check with her."
+reading = { action = "decline" }
+expect = "decline"
+must_pass = true
+
+[[cases]]
+id = "permission-hedged"
+stage = "proxy_permission"
+say = "I think so, maybe?"
+reading = { action = "unclear" }
+expect = "reask"
+must_pass = true
+
+[[cases]]
+id = "permission-cancel-im-her-daughter"
+stage = "proxy_permission"
+setup = "proxy_permission_cancel"
+say = "Yes, I do, I'm her daughter."
+reading = { action = "affirm" }
+expect = "advance"
+to = "name"
+must_pass = true
+
+[[cases]]
+id = "permission-cancel-shes-fine-with-it"
+stage = "proxy_permission"
+setup = "proxy_permission_cancel"
+say = "She's fine with it."
+reading = { action = "affirm" }
+expect = "advance"
+to = "name"
+must_pass = true
+
+[[cases]]
+id = "permission-split-yes-then-permission"
+stage = "proxy_permission"
+turns = [
+    { say = "Yes.", reading = { action = "affirm" } },
+    { say = "I have the permission.", reading = { action = "unclear" } },
+]
+expect = "advance"
+to = "name"
+must_pass = true
+reported = 2
+note = "The second turn lands on the name question; with a correct reading the call re-asks the name."
+
+[[cases]]
+id = "permission-split-live-reading"
+stage = "proxy_permission"
+turns = [
+    { say = "Yes.", reading = { action = "affirm" } },
+    { say = "I have the permission.", reading = { action = "unclear" }, live_reading = { action = "staff", needs_staff = true } },
+]
+expect = "advance"
+to = "name"
+must_pass = true
+reported = 2
+
+# ---------------------------------------------------------------- name
+
+[[cases]]
+id = "name-bare"
+stage = "name"
+say = "Maria Lopez"
+reading = { action = "name", value = "Maria Lopez" }
+expect = "advance"
+to = "dob"
+must_pass = true
+
+[[cases]]
+id = "name-my-name-is"
+stage = "name"
+say = "My name is Maria Lopez."
+reading = { action = "name", value = "Maria Lopez" }
+expect = "advance"
+to = "dob"
+must_pass = true
+
+[[cases]]
+id = "name-its"
+stage = "name"
+say = "It's Maria Lopez."
+reading = { action = "name", value = "Maria Lopez" }
+expect = "advance"
+to = "dob"
+must_pass = true
+
+[[cases]]
+id = "name-sure-its"
+stage = "name"
+say = "Sure, it's Maria Lopez."
+reading = { action = "name", value = "Maria Lopez" }
+expect = "advance"
+to = "dob"
+must_pass = true
+
+[[cases]]
+id = "name-this-is-calling"
+stage = "name"
+say = "Yeah, this is Maria Lopez calling."
+reading = { action = "name", value = "Maria Lopez" }
+expect = "advance"
+to = "dob"
+must_pass = true
+
+[[cases]]
+id = "name-repeated"
+stage = "name"
+say = "Maria. Maria Lopez."
+reading = { action = "name", value = "Maria Lopez" }
+expect = "advance"
+to = "dob"
+must_pass = true
+
+[[cases]]
+id = "name-patient-is"
+stage = "name"
+setup = "name_patient"
+say = "Uh, the patient is John Smith."
+reading = { action = "name", value = "John Smith" }
+expect = "advance"
+to = "dob"
+must_pass = true
+
+[[cases]]
+id = "name-patient-spelled"
+stage = "name"
+setup = "name_patient"
+say = "His name is Robert Chen, that's C H E N."
+reading = { action = "name", value = "Robert Chen" }
+expect = "advance"
+to = "dob"
+must_pass = false
+note = "The spelled letters may reasonably end up in the value."
+
+[[cases]]
+id = "name-why-do-you-need-it"
+stage = "name"
+say = "Why do you need my name?"
+reading = { action = "unclear" }
+expect = "reask"
+must_pass = true
+
+[[cases]]
+id = "name-patient-off-topic-permission"
+stage = "name"
+setup = "name_patient"
+say = "I have the permission."
+reading = { action = "unclear" }
+expect = "reask"
+must_pass = true
+reported = 2
+
+[[cases]]
+id = "name-patient-its-me"
+stage = "name"
+setup = "name_patient"
+say = "It's me."
+reading = { action = "unclear" }
+expect = "reask"
+reply_has = "name"
+must_pass = true
+note = "Live call: 'It's me.' was taken as the patient's name 'me'."
+
+[[cases]]
+id = "name-patient-pronoun"
+stage = "name"
+setup = "name_patient"
+say = "It's him."
+reading = { action = "unclear" }
+expect = "reask"
+reply_has = "name"
+must_pass = true
+
+[[cases]]
+id = "name-with-birth-date"
+stage = "name"
+say = "Maria Lopez, and my date of birth is July 2nd 1984."
+reading = { action = "name", value = "Maria Lopez" }
+expect = "advance"
+to = "check_dob"
+must_pass = true
+
+# ---------------------------------------------------------------- check_name
+
+[[cases]]
+id = "check-name-yes"
+stage = "check_name"
+say = "Yes."
+reading = { action = "affirm" }
+expect = "advance"
+to = "dob"
+must_pass = true
+
+[[cases]]
+id = "check-name-yes-thats-right"
+stage = "check_name"
+say = "Yes, that's right."
+reading = { action = "affirm" }
+expect = "advance"
+to = "dob"
+must_pass = true
+
+[[cases]]
+id = "check-name-yep-thats-him"
+stage = "check_name"
+say = "Yep, that's him."
+reading = { action = "affirm" }
+expect = "advance"
+to = "dob"
+must_pass = true
+
+[[cases]]
+id = "check-name-correct-with-name"
+stage = "check_name"
+say = "That's correct, John Smith."
+reading = { action = "affirm" }
+expect = "advance"
+to = "dob"
+must_pass = true
+
+[[cases]]
+id = "check-name-yes-thats-my-dad"
+stage = "check_name"
+say = "Yes, John Smith, that's my dad."
+reading = { action = "affirm" }
+expect = "advance"
+to = "dob"
+must_pass = true
+
+[[cases]]
+id = "check-name-no"
+stage = "check_name"
+say = "No."
+reading = { action = "decline" }
+expect = "advance"
+to = "name"
+must_pass = true
+
+[[cases]]
+id = "check-name-no-with-correction"
+stage = "check_name"
+say = "No, it's Jane Smith."
+reading = { action = ["name", "decline"], value = "Jane Smith", answer = "no" }
+expect = "reask"
+reply_has = "Jane Smith"
+must_pass = true
+
+[[cases]]
+id = "check-name-uh-huh"
+stage = "check_name"
+say = "Uh huh."
+reading = { action = "affirm" }
+expect = "advance"
+to = "dob"
+must_pass = false
+note = "A bare acknowledgment; agreement is likely but not certain."
+
+[[cases]]
+id = "check-name-hedged"
+stage = "check_name"
+say = "I think so?"
+reading = { action = "unclear" }
+expect = "reask"
+must_pass = true
+
+# ---------------------------------------------------------------- dob
+
+[[cases]]
+id = "dob-plain"
+stage = "dob"
+say = "July 2 1984"
+reading = { action = "birth_date", value = "1984-07-02" }
+expect = "advance"
+to = "check_dob"
+must_pass = true
+
+[[cases]]
+id = "dob-its-ordinal"
+stage = "dob"
+say = "It's July second, 1984."
+reading = { action = "birth_date", value = "1984-07-02" }
+expect = "advance"
+to = "check_dob"
+must_pass = true
+
+[[cases]]
+id = "dob-slashes"
+stage = "dob"
+say = "07/02/1984"
+reading = { action = "birth_date", value = "1984-07-02" }
+expect = "advance"
+to = "check_dob"
+must_pass = true
+
+[[cases]]
+id = "dob-spoken-long"
+stage = "dob"
+say = "I was born on the second of July, nineteen eighty-four."
+reading = { action = "birth_date", value = "1984-07-02" }
+expect = "advance"
+to = "check_dob"
+must_pass = true
+
+[[cases]]
+id = "dob-thinking"
+stage = "dob"
+say = "Um, let me think, it's 1984, July 2nd."
+reading = { action = "birth_date", value = "1984-07-02" }
+expect = "advance"
+to = "check_dob"
+must_pass = true
+
+[[cases]]
+id = "dob-no-year"
+stage = "dob"
+say = "July 2nd."
+reading = { action = "birth_date", value = "July 2" }
+expect = "reask"
+reply_has = "year"
+must_pass = true
+
+[[cases]]
+id = "dob-keypad"
+stage = "dob"
+say = "Can I just type it in on the keypad?"
+reading = { action = "keypad" }
+expect = "advance"
+to = "keypad"
+must_pass = true
+
+[[cases]]
+id = "dob-why"
+stage = "dob"
+say = "Why do you need that?"
+reading = { action = "unclear" }
+expect = "reask"
+must_pass = true
+
+[[cases]]
+id = "dob-year-cut-off"
+stage = "dob"
+say = "18th August 19"
+reading = { action = "birth_date", value = "August 18" }
+live_reading = { action = "birth_date", value = "2019-08-18" }
+expect = "reask"
+reply_has = "year"
+must_pass = true
+note = "Live call: the transcriber cut off '19 85' and the model filled in 2019."
+
+[[cases]]
+id = "dob-name-correction"
+stage = "dob"
+say = "The name is Mia Smith."
+reading = { action = "name", value = "Mia Smith" }
+expect = "reask"
+reply_has = "birth"
+state = { name = "Mia Smith" }
+must_pass = true
+note = "Live call: a name given at the birth-date question was read as a bad date."
+
+[[cases]]
+id = "dob-name-correction-plain"
+stage = "dob"
+say = "Sorry, my name is actually Mia Smith."
+reading = { action = "name", value = "Mia Smith" }
+expect = "reask"
+reply_has = "birth"
+state = { name = "Mia Smith" }
+must_pass = true
+
+[[cases]]
+id = "dob-digit-words"
+stage = "dob"
+say = "Seven two eighty-four."
+reading = { action = "birth_date", value = "1984-07-02" }
+expect = "advance"
+to = "check_dob"
+must_pass = false
+note = "Month and day order is ambiguous in digit words."
+
+# ---------------------------------------------------------------- check_dob
+
+[[cases]]
+id = "check-dob-yes"
+stage = "check_dob"
+say = "Yes."
+reading = { action = "affirm" }
+expect = "advance"
+to = "select_slot"
+must_pass = true
+
+[[cases]]
+id = "check-dob-yep-thats-me"
+stage = "check_dob"
+say = "Yep, that's me."
+reading = { action = "affirm" }
+expect = "advance"
+to = "select_slot"
+must_pass = true
+
+[[cases]]
+id = "check-dob-all-correct"
+stage = "check_dob"
+say = "Yes, that's all correct."
+reading = { action = "affirm" }
+expect = "advance"
+to = "select_slot"
+must_pass = true
+
+[[cases]]
+id = "check-dob-correct"
+stage = "check_dob"
+say = "Correct."
+reading = { action = "affirm" }
+expect = "advance"
+to = "select_slot"
+must_pass = true
+
+[[cases]]
+id = "check-dob-yeah-with-name"
+stage = "check_dob"
+say = "Yeah that's right, Maria Lopez."
+reading = { action = "affirm" }
+expect = "advance"
+to = "select_slot"
+must_pass = true
+
+[[cases]]
+id = "check-dob-no"
+stage = "check_dob"
+say = "No."
+reading = { action = "decline" }
+expect = "advance"
+to = "correct_identity"
+must_pass = true
+
+[[cases]]
+id = "check-dob-new-birthday"
+stage = "check_dob"
+say = "No, my birthday is July 3rd, 1984."
+reading = { action = ["birth_date", "decline"], value = "1984-07-03", answer = "no" }
+expect = "reask"
+reply_has = "July 3, 1984"
+must_pass = true
+
+[[cases]]
+id = "check-dob-year-wrong"
+stage = "check_dob"
+say = "The name is right but the year should be 1985."
+reading = { action = ["birth_date", "change_date", "decline"], value = "1985-07-02", answer = "no" }
+expect = "reask"
+reply_has = "1985"
+must_pass = false
+note = "The model has to combine the read-back month and day with the new year."
+
+[[cases]]
+id = "check-dob-hedged"
+stage = "check_dob"
+say = "I think so."
+reading = { action = "unclear" }
+expect = "reask"
+must_pass = true
+
+# ---------------------------------------------------------------- other_provider
+
+[[cases]]
+id = "other-provider-yes"
+stage = "other_provider"
+say = "Yes."
+reading = { action = "affirm" }
+expect = "advance"
+to = "name"
+must_pass = true
+
+[[cases]]
+id = "other-provider-anyone-fine"
+stage = "other_provider"
+say = "Sure, anyone is fine."
+reading = { action = "affirm" }
+expect = "advance"
+to = "name"
+must_pass = true
+
+[[cases]]
+id = "other-provider-yes-i-do"
+stage = "other_provider"
+say = "Yes I do."
+reading = { action = "affirm" }
+expect = "advance"
+to = "name"
+must_pass = true
+
+[[cases]]
+id = "other-provider-earliest"
+stage = "other_provider"
+say = "Okay, whoever has the earliest opening."
+reading = { action = "affirm" }
+expect = "advance"
+to = "name"
+must_pass = true
+
+[[cases]]
+id = "other-provider-names-chen"
+stage = "other_provider"
+say = "Yeah, can I see Dr. Chen instead?"
+reading = { action = "preferences", value_contains = "Chen", answer = ["yes", "unclear"] }
+expect = "advance"
+to = "name"
+state = { provider = "chen" }
+must_pass = true
+
+[[cases]]
+id = "other-provider-no-thanks"
+stage = "other_provider"
+say = "No thanks."
+reading = { action = "decline" }
+expect = "decline"
+must_pass = true
+
+[[cases]]
+id = "other-provider-will-wait"
+stage = "other_provider"
+say = "No, I'd rather wait until Dr. Smith is available."
+reading = { action = "decline" }
+expect = "decline"
+must_pass = true
+
+[[cases]]
+id = "other-provider-who-else"
+stage = "other_provider"
+say = "Hmm, maybe, who else is there?"
+reading = { action = "unclear" }
+expect = "reask"
+must_pass = false
+note = "A question back; a list of doctors would also be a fair reply."
+
+[[cases]]
+id = "other-provider-downtown-condition"
+stage = "other_provider"
+say = "Yes, as long as they're at the downtown office."
+reading = { action = ["preferences", "affirm"], value_contains = "downtown", answer = "unclear" }
+expect = "advance"
+to = "name"
+must_pass = false
+note = "Agreement with a location condition; preferences or affirm are both reasonable."
+
+# ---------------------------------------------------------------- day_alternative
+
+[[cases]]
+id = "day-alt-yes"
+stage = "day_alternative"
+say = "Yes."
+reading = { action = "affirm" }
+expect = "advance"
+to = "select_slot"
+must_pass = true
+
+[[cases]]
+id = "day-alt-yes-soonest"
+stage = "day_alternative"
+say = "Yes please, whatever's soonest."
+reading = { action = "affirm" }
+expect = "advance"
+to = "select_slot"
+must_pass = true
+
+[[cases]]
+id = "day-alt-next-day-fine"
+stage = "day_alternative"
+say = "Yeah, the next day is fine."
+reading = { action = "affirm" }
+expect = "advance"
+to = "select_slot"
+must_pass = true
+
+[[cases]]
+id = "day-alt-tomorrow"
+stage = "day_alternative"
+say = "Sure, tomorrow works."
+reading = { action = ["preferences", "affirm"], answer = "yes" }
+expect = "advance"
+to = "select_slot"
+must_pass = true
+
+[[cases]]
+id = "day-alt-friday-morning"
+stage = "day_alternative"
+say = "How about Friday morning?"
+reading = { action = "preferences", value_contains = "Friday", answer = ["no", "unclear", "not_applicable"] }
+expect = "advance"
+to = "select_slot"
+must_pass = true
+
+[[cases]]
+id = "day-alt-no-thanks"
+stage = "day_alternative"
+say = "No, thanks."
+reading = { action = "decline" }
+expect = "decline"
+must_pass = true
+
+[[cases]]
+id = "day-alt-call-back"
+stage = "day_alternative"
+say = "No, I'll just call back another time."
+reading = { action = "decline" }
+expect = "decline"
+must_pass = true
+
+[[cases]]
+id = "day-alt-yes-if-after-3"
+stage = "day_alternative"
+say = "yes if it's after 3"
+reading = { action = "preferences", value_contains = "3", answer = "unclear" }
+expect = "advance"
+to = "select_slot"
+state = { after = "15:00:00" }
+must_pass = false
+note = "A conditional yes is a time preference here, not plain agreement."
+
+[[cases]]
+id = "day-alt-hedged"
+stage = "day_alternative"
+say = "I guess, maybe?"
+reading = { action = "unclear" }
+expect = "reask"
+must_pass = true
+
+# ---------------------------------------------------------------- select_slot
+
+[[cases]]
+id = "slot-one"
+stage = "select_slot"
+say = "One."
+reading = { action = "select", value = "1" }
+expect = "advance"
+to = "confirm_change"
+must_pass = true
+
+[[cases]]
+id = "slot-first-one-please"
+stage = "select_slot"
+say = "The first one, please."
+reading = { action = "select", value = "1" }
+expect = "advance"
+to = "confirm_change"
+must_pass = true
+
+[[cases]]
+id = "slot-option-two"
+stage = "select_slot"
+say = "Option two."
+reading = { action = "select", value = "2" }
+expect = "advance"
+to = "confirm_change"
+must_pass = true
+
+[[cases]]
+id = "slot-second-sounds-good"
+stage = "select_slot"
+say = "The second one sounds good to me."
+reading = { action = "select", value = "2" }
+expect = "advance"
+to = "confirm_change"
+must_pass = true
+
+[[cases]]
+id = "slot-by-time-and-doctor"
+stage = "select_slot"
+say = "I'll take the 9:40 with Dr. Chen."
+reading = { action = "select", value = "2" }
+expect = "advance"
+to = "confirm_change"
+must_pass = true
+
+[[cases]]
+id = "slot-last-one"
+stage = "select_slot"
+say = "Let's do the last one."
+reading = { action = "select", value = "3" }
+expect = "advance"
+to = "confirm_change"
+must_pass = true
+
+[[cases]]
+id = "slot-afternoon-instead"
+stage = "select_slot"
+say = "Do you have anything in the afternoon instead?"
+reading = { action = "preferences", value_contains = "afternoon" }
+expect = "reask"
+reply_has = "Option 1"
+state = { period = "afternoon" }
+must_pass = true
+
+[[cases]]
+id = "slot-repeat"
+stage = "select_slot"
+say = "Sorry, can you repeat those?"
+reading = { action = "repeat" }
+expect = "reask"
+reply_has = "Option 1"
+must_pass = true
+
+[[cases]]
+id = "slot-more"
+stage = "select_slot"
+say = "What else do you have?"
+reading = { action = "more" }
+expect = "reask"
+must_pass = true
+
+[[cases]]
+id = "slot-either-of-two"
+stage = "select_slot"
+say = "Hmm, either of the first two would work."
+reading = { action = "unclear" }
+expect = "reask"
+must_pass = false
+note = "Two possible choices is not a selection, but some readers would pick the first."
+
+# ---------------------------------------------------------------- confirm_change
+
+[[cases]]
+id = "confirm-yes"
+stage = "confirm_change"
+say = "Yes."
+reading = { action = "affirm" }
+expect = "booked"
+must_pass = true
+
+[[cases]]
+id = "confirm-yes-go-ahead"
+stage = "confirm_change"
+say = "Yes, go ahead."
+reading = { action = "affirm" }
+expect = "booked"
+must_pass = true
+
+[[cases]]
+id = "confirm-yes-book-it"
+stage = "confirm_change"
+say = "Yes please, book it."
+reading = { action = "affirm" }
+expect = "booked"
+must_pass = true
+
+[[cases]]
+id = "confirm-that-works"
+stage = "confirm_change"
+say = "Yeah, that works for me."
+reading = { action = "affirm" }
+expect = "booked"
+must_pass = true
+
+[[cases]]
+id = "confirm-lets-do-it"
+stage = "confirm_change"
+say = "Sounds great, let's do it."
+reading = { action = "affirm" }
+expect = "booked"
+must_pass = true
+
+[[cases]]
+id = "confirm-no"
+stage = "confirm_change"
+say = "No."
+reading = { action = "decline" }
+expect = "decline"
+must_pass = true
+
+[[cases]]
+id = "confirm-no-changed-mind"
+stage = "confirm_change"
+say = "Actually no, I changed my mind, don't book it."
+reading = { action = "decline" }
+expect = "decline"
+must_pass = true
+
+[[cases]]
+id = "confirm-yes-if-after-3"
+stage = "confirm_change"
+say = "yes if it's after 3"
+reading = { action = ["unclear", "preferences"], answer = "unclear" }
+expect = "no_write"
+must_pass = true
+
+[[cases]]
+id = "confirm-hedged"
+stage = "confirm_change"
+say = "I think so, maybe?"
+reading = { action = "unclear" }
+expect = "no_write"
+must_pass = true
+
+[[cases]]
+id = "confirm-bare-okay"
+stage = "confirm_change"
+say = "Okay."
+reading = { action = "unclear" }
+expect = "no_write"
+must_pass = false
+note = "A bare acknowledgment is not consent to a booking change, but readers disagree."
+
+[[cases]]
+id = "confirm-yes-but-afternoon"
+stage = "confirm_change"
+say = "Yes, but can we do the afternoon instead?"
+reading = { action = "preferences", value_contains = "afternoon", answer = ["unclear", "no"] }
+expect = "no_write"
+must_pass = true
+
+[[cases]]
+id = "confirm-question-location"
+stage = "confirm_change"
+say = "Wait, which office is that one at?"
+reading = { action = "unclear", answer = ["unclear", "not_applicable"] }
+expect = "no_write"
+must_pass = true
+
+# ---------------------------------------------------------------- email_readback
+
+[[cases]]
+id = "email-yes"
+stage = "email_readback"
+say = "Yes."
+reading = { action = "affirm" }
+expect = "advance"
+to = "confirm_change"
+must_pass = true
+
+[[cases]]
+id = "email-yep-thats-it"
+stage = "email_readback"
+say = "Yep, that's it."
+reading = { action = "affirm" }
+expect = "advance"
+to = "confirm_change"
+must_pass = true
+
+[[cases]]
+id = "email-thats-right"
+stage = "email_readback"
+say = "That's right."
+reading = { action = "affirm" }
+expect = "advance"
+to = "confirm_change"
+must_pass = true
+
+[[cases]]
+id = "email-correct-thank-you"
+stage = "email_readback"
+say = "Yes, that's correct, thank you."
+reading = { action = "affirm" }
+expect = "advance"
+to = "confirm_change"
+must_pass = true
+
+[[cases]]
+id = "email-always-use"
+stage = "email_readback"
+say = "Yes, that's the one I always use."
+reading = { action = "affirm" }
+expect = "advance"
+to = "confirm_change"
+must_pass = true
+
+[[cases]]
+id = "email-no"
+stage = "email_readback"
+say = "No."
+reading = { action = "decline" }
+expect = "advance"
+to = "email_address"
+must_pass = true
+
+[[cases]]
+id = "email-no-with-correction"
+stage = "email_readback"
+say = "No, it's maria.lopez at example dot com."
+reading = { action = ["email", "decline"], value = "maria.lopez@example.com", answer = "no" }
+expect = "reask"
+reply_has = "maria dot lopez at example dot com"
+must_pass = true
+
+[[cases]]
+id = "email-skip"
+stage = "email_readback"
+say = "Actually, just skip the email."
+reading = { action = "skip_email", answer = ["no", "unclear", "not_applicable"] }
+expect = "advance"
+to = "confirm_change"
+must_pass = true
+
+[[cases]]
+id = "email-hedged"
+stage = "email_readback"
+say = "I think so? Maybe check the spelling."
+reading = { action = "unclear" }
+expect = "reask"
+must_pass = true
+
+# ---------------------------------------------------------------- anything_else
+
+[[cases]]
+id = "anything-no-thats-all"
+stage = "anything_else"
+say = "No, that's all, thanks."
+reading = { action = "done" }
+expect = "goodbye"
+must_pass = true
+
+[[cases]]
+id = "anything-all-set"
+stage = "anything_else"
+say = "Nope, I'm all set."
+reading = { action = "done" }
+expect = "goodbye"
+must_pass = true
+
+[[cases]]
+id = "anything-thats-everything"
+stage = "anything_else"
+say = "That's everything, thank you so much for your help."
+reading = { action = "done" }
+expect = "goodbye"
+must_pass = true
+
+[[cases]]
+id = "anything-no-bye"
+stage = "anything_else"
+say = "No, I'm good. Bye!"
+reading = { action = "done" }
+expect = "goodbye"
+must_pass = true
+
+[[cases]]
+id = "anything-book-follow-up"
+stage = "anything_else"
+say = "Actually yes, I need to book a follow-up."
+reading = { action = "book" }
+expect = "advance"
+to = "booking_recipient"
+must_pass = true
+
+[[cases]]
+id = "anything-cancel"
+stage = "anything_else"
+say = "Can I also cancel my appointment next week?"
+reading = { action = "cancel" }
+expect = "advance"
+to = "name"
+must_pass = true
+
+[[cases]]
+id = "anything-wife-needs-one"
+stage = "anything_else"
+say = "Yes, my wife also needs an appointment."
+reading = { action = "book", patient = "other" }
+expect = "advance"
+to = "proxy_permission"
+state = { "party.relation" = "wife" }
+must_pass = true
+
+[[cases]]
+id = "anything-bare-yes"
+stage = "anything_else"
+say = "Yes."
+reading = { action = "unclear" }
+expect = "reask"
+reply_has = "What else can I help with?"
+must_pass = true
+
+[[cases]]
+id = "anything-medicare"
+stage = "anything_else"
+say = "Do you take Medicare?"
+reading = { action = ["insurance", "accepted_insurance"] }
+expect = "info"
+must_pass = true
+
+[[cases]]
+id = "anything-not-sure"
+stage = "anything_else"
+say = "Hmm, I'm not sure, let me think."
+reading = { action = "unclear" }
+expect = "advance"
+to = "intent"
+must_pass = false
+note = "The call should stay open; whether it re-asks or listens is a judgment call."

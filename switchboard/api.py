@@ -9,6 +9,7 @@ from pathlib import Path
 from time import monotonic
 from urllib.parse import urlsplit
 
+import anthropic
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
@@ -149,7 +150,8 @@ async def lifespan(app: FastAPI):
             if local_model
             else None
         )
-        app.state.turn_interpreter = local_interpreter or app.state.intent_router
+        # Claude reads turns when configured; Ollama is the fallback reader.
+        app.state.turn_interpreter = app.state.intent_router or local_interpreter
         app.state.twilio = TwilioConfig.from_env()
         if app.state.twilio:
             app.state.tickets = StreamTickets(
@@ -175,12 +177,23 @@ async def lifespan(app: FastAPI):
         )
         app.state.frontdesk = FrontDesk(app.state.ops, MailSettings.configured())
         app.state.ops.frontdesk = app.state.frontdesk
+        # SWITCHBOARD_CALL_ENGINE=agent lets Claude run Vapi calls; otherwise the scripted call.
+        agent_engine = os.getenv("SWITCHBOARD_CALL_ENGINE") == "agent"
+        if agent_engine and not os.getenv("ANTHROPIC_API_KEY"):
+            logging.getLogger(__name__).warning(
+                "SWITCHBOARD_CALL_ENGINE=agent needs ANTHROPIC_API_KEY; using the scripted call"
+            )
+            agent_engine = False
+        app.state.call_engine = "agent" if agent_engine else "scripted"
+        app.state.agent_client = (
+            anthropic.AsyncAnthropic(max_retries=1, timeout=10.0) if agent_engine else None
+        )
         app.state.vapi = vapi = VapiCalls.configured(app.state)
-        app.state.browser_router = local_interpreter or (
+        app.state.browser_router = (
             app.state.intent_router
             if not fhir_url and os.getenv("SWITCHBOARD_ENABLE_BROWSER_MODEL") == "1"
             else None
-        )
+        ) or local_interpreter
         app.state.filler_audio = b""
         workers = [
             asyncio.create_task(sweep(app.state.scheduling)),
@@ -203,6 +216,8 @@ async def lifespan(app: FastAPI):
             for worker in workers:
                 worker.cancel()
             await asyncio.gather(*workers, return_exceptions=True)
+            if isinstance(app.state.agent_client, anthropic.AsyncAnthropic):
+                await app.state.agent_client.close()
 
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)

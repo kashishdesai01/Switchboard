@@ -31,6 +31,7 @@ from switchboard.understanding import (
     leading_answer,
     name_from_reply,
     proxy_request,
+    reading_proxy,
     request_route,
 )
 
@@ -91,6 +92,8 @@ class Call(StagesMixin, SafetyMixin, IdentityMixin, IntakeMixin, OffersMixin, Co
         self.name = ""
         self.dob: date | None = None
         self.dob_fragment: str | None = None
+        # Leading digits of a birth year cut off mid-reply ("August 18th, 19").
+        self.dob_year_start = ""
         self.dob_retries = 0
         self.identity_playback_retries = 0
         self.new_patient: Resource | None = None
@@ -112,6 +115,10 @@ class Call(StagesMixin, SafetyMixin, IdentityMixin, IntakeMixin, OffersMixin, Co
         self.pending_email: str | None = None
         self.staff_topic: str | None = None
         self.unclear = 0
+        # Replies in a row that didn't answer the question and drew a staff reading.
+        self.off_topic = 0
+        # Replies to the name question the model read as holding no name.
+        self.nameless_replies = 0
         self.opening_interpreter_failures = 0
         self.digits = ""
         self.provider: str | None = None
@@ -393,6 +400,10 @@ class Call(StagesMixin, SafetyMixin, IdentityMixin, IntakeMixin, OffersMixin, Co
                         )
                 staff = STAFF_TOPIC.search(words)
                 proxy = proxy_request(words)
+                if proxy is None and meaning and meaning.patient == "other":
+                    # The reading names someone else as the patient where the regex
+                    # cues ("for my mom", "my dad needs") found nothing.
+                    proxy = reading_proxy(meaning.extra, meaning.value, words)
                 book_request = is_booking_request(words)
                 booking = self.stage == "intent" and (
                     book_request or (not staff and bool(meaning and meaning.action == "book"))
@@ -425,38 +436,60 @@ class Call(StagesMixin, SafetyMixin, IdentityMixin, IntakeMixin, OffersMixin, Co
                     and not EXPLICIT_STAFF.search(words)
                 ):
                     return await self._handle(text, words, meaning)
-                grounded_reply = (
-                    (self.stage == "dob" and bool(birth_dates(text, self.scheduling.now().date())))
-                    or (self.stage == "name" and bool(name_from_reply(text)))
-                    or (
-                        self.stage in CONFIRMATION_STAGES
-                        and answer_to_confirmation(words) is not None
-                    )
-                    or (
-                        self.stage in {"select_slot", "select_existing"}
-                        and self._selection(words) is not None
-                    )
-                    or (
-                        self.stage == "select_existing"
-                        and self.single_existing
-                        and answer_to_confirmation(words) is not None
+                # A reply that answers the current question is grounded: a staff topic
+                # or needs_staff flag riding along doesn't hand the caller off.
+                grounded_reply = self._answers_question(meaning) or (
+                    meaning is None
+                    and (
+                        (
+                            self.stage == "dob"
+                            and bool(birth_dates(text, self.scheduling.now().date()))
+                        )
+                        or (self.stage == "name" and bool(name_from_reply(text)))
+                        or (
+                            self.stage in CONFIRMATION_STAGES
+                            and answer_to_confirmation(words) is not None
+                        )
+                        or (
+                            self.stage in {"select_slot", "select_existing"}
+                            and self._selection(words) is not None
+                        )
+                        or (
+                            self.stage == "select_existing"
+                            and self.single_existing
+                            and answer_to_confirmation(words) is not None
+                        )
                     )
                 )
+                model_staff = bool(meaning and (meaning.action == "staff" or meaning.needs_staff))
+                if (
+                    model_staff
+                    and not staff
+                    and not grounded_reply
+                    and not booking
+                    and words != "0"
+                    and not EXPLICIT_STAFF.search(words)
+                    and not proxy
+                    and self.stage not in {"intent", "anything_else"}
+                    and self.off_topic < 1
+                    and self.last_reply
+                ):
+                    # The reply didn't answer the question: ask it again in context
+                    # before handing off.
+                    self.off_topic += 1
+                    previous = self.last_reply
+                    question = previous.text.removeprefix("Thanks. ")
+                    return self.say(
+                        f"Thanks. {question}",
+                        confirm=previous.confirmation,
+                        calendar=previous.calendar,
+                        email_status=previous.email_status,
+                    )
                 if (
                     words == "0"
                     or EXPLICIT_STAFF.search(words)
                     or proxy
-                    or (
-                        (
-                            staff
-                            or (
-                                meaning
-                                and (meaning.action == "staff" or meaning.needs_staff)
-                                and not grounded_reply
-                            )
-                        )
-                        and not booking
-                    )
+                    or ((staff or model_staff) and not grounded_reply and not booking)
                 ):
                     self.staff_topic = (
                         "proxy request" if proxy else staff[0] if staff else "staff requested"
@@ -468,6 +501,11 @@ class Call(StagesMixin, SafetyMixin, IdentityMixin, IntakeMixin, OffersMixin, Co
                         if self.frontdesk
                         else "This request needs the front desk.",
                     )
+                if grounded_reply and staff and not self.staff_topic:
+                    # Answered, with a staff topic alongside: record it for the front desk.
+                    self.staff_topic = staff[0]
+                if grounded_reply and not staff:
+                    self.off_topic = 0
                 if booking and (staff or (meaning and meaning.needs_staff)):
                     self.staff_topic = staff[0] if staff else "additional caller request"
                 if (
@@ -530,9 +568,11 @@ class Call(StagesMixin, SafetyMixin, IdentityMixin, IntakeMixin, OffersMixin, Co
         self.old = None
         self.pending_email = self.staff_topic = None
         self.pending_request = None
-        self.unclear = self.opening_interpreter_failures = 0
+        self.unclear = self.opening_interpreter_failures = self.off_topic = 0
+        self.nameless_replies = 0
         self.safety_resume, self.safety_opening, self.safety_retries = None, None, 0
         self.name, self.dob, self.dob_fragment = "", None, None
+        self.dob_year_start = ""
         self.dob_retries = self.identity_playback_retries = self.attempts = 0
         self.new_patient = None
         self.digits = ""

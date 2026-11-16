@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from switchboard.intents import GENERAL_ACTIONS as GENERAL_ACTIONS
+from switchboard.intents import INFO_ACTIONS as INFO_ACTIONS
 from switchboard.safety import ACUTE_REASONS
 from switchboard.understanding import answer_to_confirmation as answer_to_confirmation
 
@@ -51,20 +53,27 @@ TURN_ACTIONS = {
         "other": "Caller identifies another person as the patient. Value is empty",
     },
     "select_existing": {"more": "Caller asks to hear more existing appointments"},
-    "name": {"name": "Extract only the name explicitly given in the latest reply"},
+    "name": {
+        "name": "The caller states a person's name. Value is only that name. "
+        "A reply without a person's name is not this action"
+    },
     "dob": {
         "birth_date": "Normalize the stated birth date to YYYY-MM-DD, Month DD, or YYYY alone",
         "keypad": "Caller asks to enter the date on the phone keypad",
+        "name": "Caller gives or corrects the patient's name instead of a birth date. "
+        "Value is only that name",
     },
     "correct_identity": {
-        "name": "Extract only the replacement name explicitly stated",
-        "birth_date": "Normalize the complete replacement birth date to YYYY-MM-DD",
+        "name": "Caller gives a different name from the one in the question. Value is that name",
+        "birth_date": "Caller gives a different birth date from the one in the question. "
+        "Value is it as YYYY-MM-DD",
         "change_name": "Caller asks to correct their name but does not give the replacement",
         "change_date": "Caller asks to correct their birth date but does not give the replacement",
     },
     "email_address": {
-        "email": "Normalize the email address actually stated, including spoken at and dot",
-        "skip_email": "Caller declines to provide email",
+        "email": "Caller states an email address. Value is it normalized, including spoken at "
+        "and dot. Not the address in the question",
+        "skip_email": "Caller does not want to give any email address",
     },
     "other_provider": {
         "preferences": "Value is the explicitly requested provider or scheduling preference",
@@ -86,6 +95,8 @@ TURN_ACTIONS = {
         "waitlist": "Caller asks to be added to the waitlist",
     },
 }
+# Stages whose readings may name a provider, place or service.
+CLINIC_DETAIL_STAGES = frozenset({"intent", "anything_else", "other_provider"})
 TURN_ACTIONS["anything_else"] = {
     **TURN_ACTIONS["intent"],
     "done": "The caller has nothing else to ask and is ending the call",

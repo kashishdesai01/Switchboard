@@ -1,6 +1,5 @@
 import asyncio
 import json
-import re
 from uuid import uuid4
 
 import pytest
@@ -213,7 +212,7 @@ def test_phone_establishes_who_the_visit_is_for_before_asking_for_identity(phone
         "March twenty six nineteen fifty six",
     ],
 )
-def test_phone_accepts_spoken_dob_and_explains_unconfirmed_playback(phone, spoken_date):
+def test_phone_accepts_spoken_dob_and_a_plain_yes(phone, spoken_date):
     client, store = phone
     call = PhoneCall(client)
     call.say("Book a first visit")
@@ -221,23 +220,56 @@ def test_phone_accepts_spoken_dob_and_explains_unconfirmed_playback(phone, spoke
     call.say("Cora Bell")
     prompt = call.say(spoken_date)
     assert "March 26, 1956" in prompt
-    retry = call.say("Yes")
-    assert "I have the date" in retry
-    assert "March 26, 1956" in retry
-    assert asyncio.run(store.search("Appointment")) == []
-    call.heard(retry)
+    assert "code" not in prompt.lower()
     assert "Option 1" in call.say("Yes")
 
 
-def test_phone_routes_repeated_missing_readback_to_staff(phone):
+def test_phone_repeats_an_interrupted_readback_without_a_code(phone):
+    client, store = phone
+    call = PhoneCall(client)
+    call.say("Book a first visit")
+    call.say("For me.")
+    call.say("Cora Bell")
+    assert "March 26, 1956" in call.say("March 26 1956")
+    call.event("user-interrupted")
+    retry = call.say("Yes")
+    assert "say that again" in retry and "March 26, 1956" in retry
+    assert "code" not in retry.lower()
+    assert asyncio.run(store.search("Appointment")) == []
+    assert "Option 1" in call.say("Yes")
+
+
+@pytest.mark.parametrize(
+    "turns",
+    [
+        ["18th August 19", "85"],
+        ["18th August 19", "8", "1985"],
+        ["August 18th", "nineteen eighty-five"],
+    ],
+)
+def test_phone_joins_a_birth_year_split_across_replies(phone, turns):
+    client, _ = phone
+    call = PhoneCall(client)
+    call.say("Book a first visit")
+    call.say("For me.")
+    call.say("Cora Bell")
+    replies = [call.say(turn) for turn in turns]
+    assert all("2008" not in reply for reply in replies)
+    assert "August 18, 1985" in replies[-1]
+
+
+def test_phone_routes_repeatedly_interrupted_readback_to_staff(phone):
     client, store = phone
     call = PhoneCall(client)
     call.say("Book an appointment")
     call.say("For me.")
     call.say("Maria Lopez")
     assert "July 2, 1984" in call.say("July two nineteen eighty-four")
-    assert "I have the date" in call.say("Yes")
-    assert "I have the date" in call.say("Yes")
+    call.event("user-interrupted")
+    assert "say that again" in call.say("Yes")
+    call.event("user-interrupted")
+    assert "say that again" in call.say("Yes")
+    call.event("user-interrupted")
     assert "front desk can help" in call.say("Yes")
     assert asyncio.run(store.search("Appointment")) == []
 
@@ -314,14 +346,8 @@ def test_recipient_answer_does_not_skip_handoff_consent_on_model_misclassificati
     assert "haven't made any changes" in call.say("No, thank you.")
 
 
-def spoken_confirmation(prompt):
-    match = re.search(r"To confirm, say code ([^.]+)\.", prompt)
-    assert match, prompt
-    return "Code " + match[1]
-
-
 @pytest.mark.parametrize("proxy", [False, True])
-def test_phone_books_when_vapi_never_sends_playback_callbacks(phone, proxy):
+def test_phone_books_with_plain_yes_when_vapi_sends_no_playback_events(phone, proxy):
     client, store = phone
     call = PhoneCall(client)
     if proxy:
@@ -333,15 +359,44 @@ def test_phone_books_when_vapi_never_sends_playback_callbacks(phone, proxy):
     dob_prompt = call.say("Maria Lopez")
     assert ("patient's date of birth" if proxy else "your date of birth") in dob_prompt
     assert "July 2, 1984" in call.say("July second nineteen eighty-four")
-    identity_code = spoken_confirmation(call.say("Yes"))
-    assert "Option 2" in call.say(identity_code)
-    assert "Please say yes or no" in call.say("Option one")
-    booking_code = spoken_confirmation(call.say("Yes"))
-    assert not asyncio.run(store.search("Appointment"))
-    fresh_code = spoken_confirmation(call.say(identity_code))
-    assert fresh_code != booking_code and fresh_code != identity_code
-    assert "booked" in call.say(fresh_code).lower()
+    assert "Option 2" in call.say("Yes")
+    proposal = call.say("Option one")
+    assert "code" not in proposal.lower()
+    assert "booked" in call.say("Yes").lower()
     (booked,) = asyncio.run(store.search("Appointment", patient="Patient/maria-demo"))
     assert booked["status"] == "booked"
     operations = client.get("/api/operations", headers={"Authorization": f"Bearer {SECRET}"}).json()
     assert bool(operations["notices"]) is not proxy
+
+
+def test_phone_answers_several_caller_messages_as_one_reply(phone):
+    """Vapi sends two caller messages when the caller pauses or talks over a reply."""
+    client, store = phone
+    call = PhoneCall(client)
+    call.messages.append({"role": "user", "content": "Hi."})
+    assert "permission" in call.say("I want to book a follow-up for my uncle.")
+    assert "full name" in call.say("Yes.")
+    call.messages.append({"role": "user", "content": "Carl"})
+    assert "date of birth" in call.say("Smith.")
+    readback = call.say("August 18th 1955")
+    assert "Carl Smith" in readback and "August 18, 1955" in readback
+    options = call.say("That's correct.")
+    assert "Option 1" in options
+    # The caller starts answering during the options, then finishes the sentence.
+    call.messages.append({"role": "user", "content": "The first"})
+    proposal = call.say("one please.")
+    assert "couldn't follow" not in proposal
+    assert "yes or no" in proposal
+    assert "booked" in call.say("Yes.").lower()
+
+
+def test_phone_resent_turn_with_rewritten_history_is_not_answered_twice(phone):
+    client, store = phone
+    call = PhoneCall(client)
+    call.say("Book a follow-up for me")
+    first = call.say("For me.")
+    # Vapi resends the same caller reply with a reworded earlier message.
+    call.messages[0]["content"] = "Thanks for calling. How can I help?"
+    call.messages.pop()  # our reply
+    call.messages.pop()  # the caller reply, which say() sends again
+    assert call.say("For me.") == first

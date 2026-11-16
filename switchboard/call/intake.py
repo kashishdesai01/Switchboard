@@ -9,6 +9,7 @@ from switchboard.call.vocabulary import (
     PROVIDER_NON_NAMES,
     PROVIDER_TITLE,
     PROXY_ACTIONS,
+    Party,
     Reply,
 )
 from switchboard.intents import TurnMeaning
@@ -18,13 +19,25 @@ from switchboard.spoken import (
 )
 from switchboard.understanding import (
     Proxy,
+    booking_recipient,
     is_booking_request,
+    is_greeting,
     opening_name,
     request_route,
 )
 
 
 class IntakeMixin:
+    @staticmethod
+    def _says_self(text: str, meaning: TurnMeaning | None) -> bool:
+        """Whether the opening request says plainly that the caller is the patient.
+
+        The model reading decides; the reply parser answers only without a reading.
+        """
+        if meaning is not None:
+            return meaning.patient == "self" and not meaning.doubt
+        return booking_recipient(text).kind == "self"
+
     def _proxy_action(
         self,
         words: str,
@@ -72,6 +85,10 @@ class IntakeMixin:
         patient_confirmed: bool = False,
     ) -> Reply:
         if not patient_confirmed:
+            if is_greeting(text):
+                # "Hi." or "Hello, how are you?" asks for nothing yet, whatever a model
+                # reads into it: answer in kind and ask how to help.
+                return self.say("Hi there. How can I help today?")
             if (
                 self.frontdesk
                 and re.search(r"\b(locations?|where are you|addresses)\b", words)
@@ -144,6 +161,10 @@ class IntakeMixin:
             return self.say(
                 "I'm listening. Are you looking to book or change an appointment, or ask about insurance?"
             )
+        if intent == "book" and not patient_confirmed and self._says_self(text, meaning):
+            # "Book a checkup for myself": the caller already said who the patient is.
+            self.party = Party("self")
+            patient_confirmed = True
         if intent == "book" and not patient_confirmed:
             self.intent = "book"
             self.pending_request = (words, text, meaning)

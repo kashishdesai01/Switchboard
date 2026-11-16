@@ -151,9 +151,8 @@ class IdentityMixin:
                     "identity_unverified",
                     "I have the date, but I couldn't confirm the read-back. The front desk can help.",
                 )
-            return self._read_identity(
-                "I have the date. Please wait for the read-back to finish before saying yes. "
-            )
+            # The caller talked over the read-back, so say it again in full.
+            return self._read_identity("Sorry, let me say that again. ")
         if not self.played or self.dob is None:
             return self._read_identity()
         self.identity_playback_retries = 0

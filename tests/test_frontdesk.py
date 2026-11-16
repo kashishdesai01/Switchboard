@@ -1,7 +1,8 @@
 import asyncio
 import json
+import time as time_module
 from contextlib import contextmanager
-from datetime import timedelta
+from datetime import UTC, datetime, time, timedelta
 
 import httpx
 import pytest
@@ -17,12 +18,26 @@ TOKEN = "synthetic-front-desk-staff-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
+def next_wednesday_morning() -> datetime:
+    # The clinic refuses changes inside cancel_notice_hours. Tests that book "next week"
+    # and then change the visit need it to be days away, which the real clock can't
+    # promise: on a Sunday "next Monday" is tomorrow morning.
+    today = utc_now().astimezone(BAYVIEW.timezone).date()
+    wednesday = today + timedelta(days=(2 - today.weekday()) % 7 or 7)
+    return datetime.combine(wednesday, time(9), BAYVIEW.timezone).astimezone(UTC)
+
+
+NOW = next_wednesday_morning()
+
+
 @pytest.fixture
 def desk(tmp_path, monkeypatch):
     monkeypatch.setenv("SWITCHBOARD_DB", str(tmp_path / "frontdesk.sqlite"))
     monkeypatch.setenv("SWITCHBOARD_OPERATIONS_TOKEN", TOKEN)
     monkeypatch.delenv("SWITCHBOARD_SMTP_HOST", raising=False)
+    monkeypatch.setattr("switchboard.api.utc_now", lambda: NOW)
     with TestClient(app) as client:
+        monkeypatch.setattr(app.state.scheduling, "now", lambda: NOW)
         yield client
 
 
@@ -46,7 +61,7 @@ def verify(say, name="Maria Lopez", dob="July 2, 1984"):
 
 
 def test_opening_name_today_alternatives_and_conversational_consent(desk, monkeypatch):
-    after_close = utc_now().astimezone(BAYVIEW.timezone).replace(hour=18)
+    after_close = NOW.astimezone(BAYVIEW.timezone).replace(hour=18)
     monkeypatch.setattr(app.state.scheduling, "now", lambda: after_close)
     with conversation(desk) as say:
         name = say("Hi. My name is Asha Mercer. Can I book with the doctor today?")
@@ -191,7 +206,7 @@ def test_referral_eligibility_and_actionable_staff_queue(desk):
 
 
 def test_waitlist_offer_matches_released_slot_and_is_idempotent(desk):
-    today = utc_now().astimezone(BAYVIEW.timezone).date()
+    today = NOW.astimezone(BAYVIEW.timezone).date()
     monday = today + timedelta(days=7 - today.weekday())
     target = monday.strftime("%B %d")
     with conversation(desk) as say:
@@ -346,7 +361,12 @@ def test_staff_calendar_reviews_conversation_and_changes_appointment(desk):
     assert visit["confirmation"] == "captured"
     call_path = f"/api/operations/calls/{visit['call_id']}"
     assert desk.get(call_path).status_code == 401
-    detail = desk.get(call_path, headers=AUTH).json()
+    # The server saves the call record after the socket closes; wait for it briefly.
+    for _ in range(50):
+        detail = desk.get(call_path, headers=AUTH).json()
+        if "call" in detail:
+            break
+        time_module.sleep(0.05)
     assert detail["call"]["outcome"] == "booked"
     assert {"speaker": "caller", "text": "Can you show me some other times?"} in detail[
         "transcript"
@@ -382,7 +402,7 @@ def test_staff_calendar_reviews_conversation_and_changes_appointment(desk):
 
 @pytest.mark.parametrize("selection_style", ["spoken time", "date and time", "please book"])
 def test_phone_style_slot_selection_keeps_the_requested_doctor(desk, selection_style):
-    today = utc_now().astimezone(BAYVIEW.timezone).date()
+    today = NOW.astimezone(BAYVIEW.timezone).date()
     first = today.replace(day=14)
     if first <= today:
         first = (today.replace(day=28) + timedelta(days=4)).replace(day=14)
@@ -433,9 +453,18 @@ def test_contextual_choice_uses_offers_and_requires_separate_confirmation(desk, 
     def provider(request):
         payload = json.loads(request.content)
         assert payload["tool_choice"]["name"] == "interpret_clinic_turn"
-        context = json.loads(payload["messages"][0]["content"])
+        # The model input is labelled lines; options and the reply are JSON.
+        lines = payload["messages"][0]["content"].splitlines()
+        context = {"stage": lines[0].removeprefix("Stage: ")}
+        for line in lines:
+            if line.startswith("Offered options: "):
+                context["options"] = json.loads(line.removeprefix("Offered options: "))
+            if line.startswith("The caller replied: "):
+                context["caller"] = json.loads(line.removeprefix("The caller replied: "))
         stages.append(context["stage"])
         action, value = "unclear", ""
+        if context["stage"] == "name":
+            action, value = "name", context["caller"]
         if context["stage"] == "select_slot":
             assert "Dr. Daniel Chen" in context["options"]["2"]
             assert "Maria Lopez" not in payload["messages"][0]["content"]

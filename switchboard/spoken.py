@@ -316,3 +316,82 @@ def parse_time(text: str, *, clinic_hours: bool = False) -> time | None:
         if hour is not None and 1 <= hour <= 12:
             return time(hour + 12 if hour <= 7 else hour)
     return None
+
+
+def number_words(number: int) -> str:
+    """0..9999 in words: 18 -> "eighteen", 105 -> "one hundred five"."""
+    ones, tens = list(YEAR_ONES), list(YEAR_TENS)
+    if number < 20:
+        return ones[number]
+    if number < 100:
+        ten, unit = divmod(number, 10)
+        return tens[ten - 2] + (f" {ones[unit]}" if unit else "")
+    if number < 1000:
+        hundred, rest = divmod(number, 100)
+        return f"{ones[hundred]} hundred" + (f" {number_words(rest)}" if rest else "")
+    thousand, rest = divmod(number, 1000)
+    return f"{number_words(thousand)} thousand" + (f" {number_words(rest)}" if rest else "")
+
+
+def year_words(year: int) -> str:
+    """1955 -> "nineteen fifty five", 2005 -> "two thousand five", 2026 -> "twenty twenty six"."""
+    if 2000 <= year < 2010:
+        return number_words(year)
+    century, rest = divmod(year, 100)
+    if not rest:
+        return f"{number_words(century)} hundred"
+    return f"{number_words(century)} " + (
+        f"oh {number_words(rest)}" if rest < 10 else number_words(rest)
+    )
+
+
+ORDINAL_WORDS = {day: word for word, day in DAY_ORDINALS.items()}
+_CLOCK = re.compile(
+    r"\b(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s?m\b\.?|(?=\s*(?:o'clock)))", re.IGNORECASE
+)
+_BARE_CLOCK = re.compile(r"\b(\d{1,2}):(\d{2})\b")
+_ORDINAL = re.compile(r"\b(\d{1,2})(?:st|nd|rd|th)\b", re.IGNORECASE)
+_MONTH_DAY = re.compile(rf"\b({MONTH_PATTERN})\s+(\d{{1,2}})\b(?!:)", re.IGNORECASE)
+_YEAR = re.compile(r"\b(19\d\d|20\d\d)\b")
+_DIGITS = re.compile(r"\b\d+\b")
+
+
+def _clock(match: re.Match[str]) -> str:
+    hour, minute = int(match[1]), int(match[2] or 0)
+    if match[3] is None or hour > 12 or minute > 59:
+        return match[0]
+    hour = hour % 12 + (12 if match[3].lower() == "p" else 0)
+    return spoken_time(time(hour, minute))
+
+
+def _bare_clock(match: re.Match[str]) -> str:
+    hour, minute = int(match[1]), int(match[2])
+    if hour > 23 or minute > 59:
+        return match[0]
+    words = spoken_time(time(hour, minute)).rsplit(" ", 1)[0] if minute else number_words(hour)
+    return words.removesuffix(" A").removesuffix(" P")
+
+
+def _digits(match: re.Match[str]) -> str:
+    value = match[0]
+    if len(value) <= 2:
+        return number_words(int(value))
+    # Longer runs (911, a code) are read digit by digit.
+    return " ".join(list(YEAR_ONES)[int(digit)] for digit in value)
+
+
+def say_numbers(text: str) -> str:
+    """Write the numbers in a spoken reply as words, so text-to-speech says them naturally.
+
+    "9:30 AM" -> "nine thirty A M", "November 18" -> "November eighteenth",
+    "18th" -> "eighteenth", "1955" -> "nineteen fifty five", "911" -> "nine one one".
+    """
+    text = _CLOCK.sub(_clock, text)
+    text = _BARE_CLOCK.sub(_bare_clock, text)
+    text = _ORDINAL.sub(lambda m: ORDINAL_WORDS.get(int(m[1]), m[0]), text)
+    text = _MONTH_DAY.sub(
+        lambda m: f"{m[1]} {ORDINAL_WORDS[int(m[2])]}" if int(m[2]) in ORDINAL_WORDS else m[0],
+        text,
+    )
+    text = _YEAR.sub(lambda m: year_words(int(m[1])), text)
+    return _DIGITS.sub(_digits, text)

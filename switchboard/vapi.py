@@ -10,7 +10,6 @@ import re
 from collections import OrderedDict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from secrets import randbelow
 from time import monotonic, time
 from typing import Annotated
 from uuid import UUID, uuid4
@@ -19,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.datastructures import State
 
+from switchboard.agent import AgentCall
 from switchboard.conversation import Call, Reply
 from switchboard.safety import emergency_detected
 
@@ -35,46 +35,25 @@ ENDED = "This demo call has ended. Thank you for calling."
 UNAVAILABLE = "I'm sorry, the demo is unavailable for this call. Please hang up and try again."
 
 
-def same_words(left: str, right: str) -> bool:
-    return " ".join(left.split()) == " ".join(right.split())
-
-
-DIGIT_WORDS = "zero one two three four five six seven eight nine".split()
-SPOKEN_DIGITS = {word: str(number) for number, word in enumerate(DIGIT_WORDS)}
-SPOKEN_DIGITS["oh"] = "0"
-
-
-def confirmation_code(text: str) -> str | None:
-    if keypad := KEYPAD.fullmatch(text):
-        return keypad[1]
-    cleaned = re.sub(r"[.,!]", " ", text.casefold()).strip()
-    cleaned = re.sub(r"^(?:confirm(?:ation code)?|code)\s+", "", cleaned)
-    if not re.fullmatch(r"[a-z0-9]+(?:[ -]+[a-z0-9]+)*", cleaned):
-        return None
-    return "".join(SPOKEN_DIGITS.get(token, token) for token in re.split(r"[ -]+", cleaned))
-
-
 @dataclass
 class Playback:
+    """A read-back awaiting yes. Vapi reports when the caller talks over it."""
+
     reply: Reply
-    spoken: str
-    code: str | None = None
-    turn: int | None = None
-    stopped_turn: int | None = None
     interrupted: bool = False
     issued_at_ms: int = field(default_factory=lambda: int(time() * 1000))
 
 
 @dataclass
 class Session:
-    call: Call | None
+    call: Call | AgentCall | None
     expires: float = field(default_factory=lambda: monotonic() + MAX_SECONDS)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     turns: int = 0
     request_digest: bytes = b""
     reply: str = ""
+    text: str = ""  # the caller reply last answered
     playback: Playback | None = None
-    issued_codes: set[str] = field(default_factory=set)
 
 
 class VapiCalls:
@@ -106,14 +85,26 @@ class VapiCalls:
             return None
         if self.state.sessions >= 20 or len(self.sessions) >= 80:
             return None
-        call = Call(
-            self.state.scheduling,
-            self.state.turn_interpreter,
-            self.state.ops.start("vapi"),
-            voice=True,
-            allow_registration=self.state.allow_registration,
-            frontdesk=self.state.frontdesk,
-        )
+        call: Call | AgentCall
+        if getattr(self.state, "call_engine", "scripted") == "agent":
+            # Claude holds the conversation; tool code guards reads and writes.
+            call = AgentCall(
+                self.state.scheduling,
+                self.state.agent_client,
+                self.state.ops.start("vapi"),
+                voice=True,
+                allow_registration=self.state.allow_registration,
+                frontdesk=self.state.frontdesk,
+            )
+        else:
+            call = Call(
+                self.state.scheduling,
+                self.state.turn_interpreter,
+                self.state.ops.start("vapi"),
+                voice=True,
+                allow_registration=self.state.allow_registration,
+                frontdesk=self.state.frontdesk,
+            )
         session = Session(call)
         self.sessions[call_id] = session
         self.state.sessions += 1
@@ -234,7 +225,7 @@ def speech(text: str, stream: bool) -> Response:
     )
 
 
-def caller_turn(data: dict) -> tuple[int, str, str, bytes]:
+def caller_turn(data: dict) -> tuple[list[str], bytes]:
     messages = data.get("messages")
     if not isinstance(messages, list) or len(messages) > MAX_TURNS * 2 + 8:
         raise HTTPException(400, "Invalid Vapi conversation history")
@@ -247,15 +238,20 @@ def caller_turn(data: dict) -> tuple[int, str, str, bytes]:
             history.append((role, content.strip()))
     if not history or history[-1][0] != "user":
         raise HTTPException(400, "Expected a caller turn")
-    count = sum(role == "user" for role, _ in history)
-    text = history[-1][1]
-    previous = history[-2][1] if len(history) >= 2 and history[-2][0] == "assistant" else ""
+    said = [content for role, content in history if role == "user"]
     digest = hashlib.sha256(json.dumps(history).encode()).digest()
-    return count, text, previous, digest
+    return said, digest
 
 
-async def handle_turn(call: Call, text: str) -> Reply:
+async def handle_turn(call: Call | AgentCall, text: str) -> Reply:
     keypad = KEYPAD.fullmatch(text)
+    if isinstance(call, AgentCall):
+        # The agent has no keypad stage: it reads the digits as the caller's words.
+        if keypad:
+            return await call.handle(
+                f"User keyed: {keypad[1]}", record="[Digits entered on keypad]"
+            )
+        return await call.handle(text)
     if keypad and call.stage == "keypad":
         for digit in keypad[1]:
             reply = await call.digit(digit)
@@ -283,14 +279,27 @@ async def completion(request: Request, calls: Annotated[VapiCalls, Depends(autho
         or number not in calls.callers
     ):
         return speech("This demo accepts calls from configured test numbers only.", stream)
-    count, text, previous, digest = caller_turn(data)
+    said, digest = caller_turn(data)
+    count = len(said)
     session = calls.sessions.get(call_id)
     if session is None:
-        if count != 1 or call_id in calls.ended:
+        if call_id in calls.ended:
             return speech(ENDED, stream)
         session = calls.open(call_id)
         if session is None:
             return speech(UNAVAILABLE, stream)
+        if isinstance(session.call, AgentCall):
+            # Vapi spoke its own first message; the agent should know what it said.
+            session.call.greeting_text = next(
+                (
+                    message["content"].strip()
+                    for message in data.get("messages", [])
+                    if isinstance(message, dict)
+                    and message.get("role") == "assistant"
+                    and isinstance(message.get("content"), str)
+                ),
+                "",
+            )[:400]
     async with session.lock:
         if call_id in calls.ended or session.expires <= monotonic():
             return speech(ENDED, stream)
@@ -299,45 +308,31 @@ async def completion(request: Request, calls: Annotated[VapiCalls, Depends(autho
         call = session.call
         if call is None:
             return speech(ENDED, stream)
-        if count != session.turns + 1:
-            return speech("I couldn't follow that reply. Please repeat it.", stream)
+        # Everything the caller said since the last turn we answered, as one reply.
+        # Vapi sends several caller messages when they pause or talk over a reply.
+        if count > session.turns:
+            text = " ".join(part for part in said[session.turns :] if part)
+        elif said[-1] == session.text:
+            # Vapi rewrote earlier history but the caller said nothing new.
+            return speech(session.reply, stream)
+        else:
+            # Vapi merged or replaced the latest reply: answer what it says now.
+            text = said[-1]
         playback = session.playback
         session.playback = None
         if not 1 <= len(text) <= 400 and not emergency_detected(text):
             call.interrupt()
-            session.turns, session.request_digest = count, digest
+            session.turns, session.request_digest, session.text = count, digest, text
             session.reply = "Could you say that again in a shorter sentence?"
             return speech(session.reply, stream)
-        code_matched = bool(
-            playback
-            and playback.code
-            and not playback.interrupted
-            and call.prompt_id == playback.reply.id
-            and confirmation_code(text) == playback.code
-        )
-        callback_matched = bool(
-            playback
-            and playback.turn is not None
-            and playback.stopped_turn == playback.turn
-            and not playback.interrupted
-            and same_words(previous, playback.spoken)
-        )
-        if playback and (callback_matched or code_matched):
+        # The caller heard the read-back unless they talked over it: Vapi stops
+        # speaking and reports the interruption, and the yes then doesn't count.
+        if playback and not playback.interrupted:
             call.playback_finished(playback.reply.id)
-            if code_matched and call.trace:
-                call.trace.add("playback_code_confirmed", state=call.stage)
         elif playback and call.trace:
-            if playback.interrupted:
-                reason = "interrupted"
-            elif playback.turn is None:
-                reason = "matching_start_missing"
-            elif playback.stopped_turn != playback.turn:
-                reason = "matching_stop_missing"
-            else:
-                reason = "history_mismatch"
-            call.trace.add("playback_unconfirmed", state=reason)
+            call.trace.add("playback_unconfirmed", state="interrupted")
         try:
-            reply = await handle_turn(call, "yes" if code_matched else text)
+            reply = await handle_turn(call, text)
         except Exception:
             LOG.error("Vapi caller turn failed")
             await calls.finish(session)
@@ -346,18 +341,9 @@ async def completion(request: Request, calls: Annotated[VapiCalls, Depends(autho
         if reply.ends_call:
             await calls.finish(session)
         elif reply.confirmation:
-            code = None
-            # A fresh code comes at the end of the full read-back. It never
-            # authorizes any other prompt or survives an interruption.
-            if playback and not (callback_matched or code_matched):
-                code = f"{randbelow(10_000):04d}"
-                while code in session.issued_codes:
-                    code = f"{randbelow(10_000):04d}"
-                session.issued_codes.add(code)
-                digits = ", ".join(DIGIT_WORDS[int(digit)] for digit in code)
-                spoken += f" To confirm, say code {digits}."
-            session.playback = Playback(reply, spoken, code)
+            session.playback = Playback(reply)
         session.turns, session.request_digest, session.reply = count, digest, spoken
+        session.text = text
         return speech(spoken, stream)
 
 
@@ -368,30 +354,16 @@ async def event(request: Request, calls: Annotated[VapiCalls, Depends(authorize)
     ended = kind == "end-of-call-report" or (
         kind == "status-update" and message.get("status") == "ended"
     )
-    if not ended and kind not in ("assistant.speechStarted", "speech-update", "user-interrupted"):
+    if not ended and kind != "user-interrupted":
         return Response(status_code=204)
     call_id = id_of(object_field(message, "call"))
     if ended:
         await calls.end(call_id)
     elif session := calls.sessions.get(call_id):
         async with session.lock:
-            if playback := session.playback:
-                turn = message.get("turn")
+            if (playback := session.playback) and kind == "user-interrupted":
                 timestamp = message.get("timestamp")
                 if type(timestamp) in (int, float) and timestamp < playback.issued_at_ms:
                     return Response(status_code=204)
-                if kind == "user-interrupted":
-                    playback.interrupted = True
-                elif kind == "assistant.speechStarted" and type(turn) is int:
-                    spoken = message.get("text")
-                    if message.get("source") == "model" and isinstance(spoken, str):
-                        if same_words(spoken, playback.spoken):
-                            playback.turn = turn
-                elif (
-                    kind == "speech-update"
-                    and message.get("status") == "stopped"
-                    and message.get("role") == "assistant"
-                    and type(turn) is int
-                ):
-                    playback.stopped_turn = turn
+                playback.interrupted = True
     return Response(status_code=204)

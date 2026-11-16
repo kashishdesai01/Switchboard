@@ -46,7 +46,7 @@ def answer_to_confirmation(words: str, action: str | None = None) -> str | None:
     if re.fullmatch(rf"(?:(?:ok|okay) )?(?:no|nope|no way|don't|do not)(?: {COURTESY})?", reply):
         return "no"
     reply = re.sub(r"^(yes|yeah|ya|yep) shore\b", r"\1 sure", reply)
-    if action and reply in {"ok", "okay", "right"}:
+    if action and bare_acknowledgment(reply):
         return None
     if re.fullmatch(rf"(?:{AFFIRMATIVE} )*{AFFIRMATIVE}(?: {COURTESY})?", reply):
         return "yes"
@@ -57,6 +57,11 @@ def answer_to_confirmation(words: str, action: str | None = None) -> str | None:
     ):
         return "yes"
     return None
+
+
+def bare_acknowledgment(words: str) -> bool:
+    """An "okay" or "right" on its own: it acknowledges, but is no consent to a change."""
+    return " ".join(re.sub(r"[.!?,;]+", " ", words).split()) in {"ok", "okay", "right"}
 
 
 def qualified(words: str) -> bool:
@@ -206,6 +211,32 @@ def proxy_request(text: str) -> Proxy | None:
     return None
 
 
+RELATION_WORD = re.compile(rf"\b(?P<relation>{RELATION}|{OTHER_PERSON})\b")
+
+
+def reading_proxy(*texts: str) -> Proxy:
+    """The patient a model reading says is someone else, by the first relation it names."""
+    for text in texts:
+        if match := RELATION_WORD.search(caller_words(text)):
+            return Proxy(match["relation"], "subject")
+    return Proxy("someone else", "subject")
+
+
+SMALL_TALK = re.compile(
+    r"(?:(?:hi|hello|hey|good (?:morning|afternoon|evening|day))(?: there)?"
+    r"|how are you(?: doing)?(?: today)?|how's it going|how are things"
+    r"|(?:i'm |i am )?(?:fine|good|well)(?: thanks| thank you)?)"
+)
+
+
+def is_greeting(text: str) -> bool:
+    """Whether a reply is only a greeting or small talk, with no request in it."""
+    words = re.sub(r"[.!?;]+", " ", caller_words(text)).split()
+    return bool(words) and bool(
+        re.fullmatch(rf"(?:{SMALL_TALK.pattern})(?: (?:{SMALL_TALK.pattern}))*", " ".join(words))
+    )
+
+
 @dataclass(frozen=True)
 class Recipient:
     """The answer to "Is the appointment for you or for someone else?"."""
@@ -277,6 +308,10 @@ def model_says_self(text: str, value: str) -> bool:
 NAME_INTRO = re.compile(
     r"^(?:(?:my |the )?(?:full )?name is|i am|i['’]m|it['’]s|this is)\b[ ,:]*", re.I
 )
+PRONOUNS = frozenset(
+    "i me myself you yourself he him himself she her herself they them themselves "
+    "we us it mine his hers theirs".split()
+)
 INTRODUCED_NAME = re.compile(r"\bmy (?:full )?name is\s+([^!?;,]+)", re.I)
 SENTENCE_AS_NAME = re.compile(
     r"\b(?:i|we|you|it|that|this|they|he|she)\s+(?:am|are|is|was|were|can|could|do|did|need|want|will|would|should|have|has)\b"
@@ -310,6 +345,8 @@ def name_from_reply(text: str) -> str | None:
     name = normalize("NFC", text.strip(" ,.!?"))
     if SENTENCE_AS_NAME.search(name) or answer_to_confirmation(name.casefold()):
         return None
+    if all(part.casefold().strip(".") in PRONOUNS for part in name.split()):
+        return None  # "It's me.", "him": a person referred to, not named
     parts = name.split()
     if len(parts) >= 3 and all(len(part) == 1 and part.isalpha() for part in parts):
         name = "".join(parts).title()

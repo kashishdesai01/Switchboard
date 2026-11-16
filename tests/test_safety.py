@@ -68,6 +68,8 @@ def test_acute_report_interrupts_booking(report, tmp_path):
     "report",
     [
         "My mom had a stroke last year, I want to book a follow-up",
+        "I want to schedule an appointment for my uncle, he had a stroke a few months ago "
+        "and was seen by Doctor Chen, and he's been doing physical therapy since.",
         "My brother had a heart attack five years ago. Can I see a doctor?",
         "No chest pain or trouble breathing; I want an appointment",
         "I've never had a seizure. Can I book a checkup?",
